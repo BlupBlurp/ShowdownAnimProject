@@ -54,16 +54,15 @@ KEYPRESS_DELAY = 0.3   # seconds between Z press and recording start
 
 # ─── VIDEO ORDER PARSING ─────────────────────────────────────────────────────
 
-def parse_recording_order(path: Path) -> list[tuple[int, int, int]]:
+def parse_recording_order(path: Path) -> list[tuple[int, int, int, int]]:
     """
-    Parse video_order.txt and return a list of (monsNo, formNo, genderVariant)
+    Parse video_order.txt and return a list of (monsNo, formNo, genderVariant, variantIdx)
     for every entry that needs its own recording.
 
     Rules:
-    - 2-value entries (monsNo, formNo): record as (monsNo, formNo, 0)
-    - 3-value entries (monsNo, formNo, genderVariant): record — each gender is
-      a separate in-game entry with its own sprite
-    - 4-value entries (monsNo, formNo, -1, variantIdx): skip — cosmetic variants
+    - 2-value (monsNo, formNo)                      → gender=0, variant=0
+    - 3-value (monsNo, formNo, gender)               → variant=0
+    - 4-value (monsNo, formNo, -1, variantIdx)       → gender=0, variant=variantIdx
     """
     order = []
 
@@ -79,12 +78,12 @@ def parse_recording_order(path: Path) -> list[tuple[int, int, int]]:
             continue
 
         if len(nums) == 2:
-            order.append((nums[0], nums[1], 0))
+            order.append((nums[0], nums[1], 0, 0))
         elif len(nums) == 3:
-            order.append((nums[0], nums[1], nums[2]))
+            order.append((nums[0], nums[1], nums[2], 0))
         elif len(nums) == 4:
-            # (monsNo, formNo, -1, variantIdx) — cosmetic variant, skip
-            continue
+            # (monsNo, formNo, -1, variantIdx)
+            order.append((nums[0], nums[1], 0, nums[3]))
 
     return order
 
@@ -179,10 +178,11 @@ def main():
 
     done = 0
     try:
-        for idx, (mon, form, gender) in enumerate(batch):
+        for idx, (mon, form, gender, variant) in enumerate(batch):
             gender_suffix = f"_g{gender}" if gender > 0 else ""
-            out_path = args.output_dir / f"{mon:04d}_{form:02d}{gender_suffix}.mp4"
-            label = f"[{start + idx}/{total - 1}] mon={mon} form={form} gender={gender}"
+            variant_suffix = f"_v{variant}" if variant > 0 else ""
+            out_path = args.output_dir / f"{mon:04d}_{form:02d}{gender_suffix}{variant_suffix}.mp4"
+            label = f"[{start + idx}/{total - 1}] mon={mon} form={form} gender={gender} variant={variant}"
             print(f"{label} → {out_path.name}")
             success = record_take(out_path)
             if success:

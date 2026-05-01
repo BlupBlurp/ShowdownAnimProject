@@ -31,21 +31,19 @@ import numpy as np
 
 # ─── PARSE video_order.txt ───────────────────────────────────────────────────
 
-def parse_video_order(path: Path) -> list[tuple[int, int, bool]]:
+def parse_video_order(path: Path) -> list[tuple[int, int, bool, int]]:
     """
-    Returns a list of (monsNo, formNo, is_female) for every valid entry.
-    Skips 4-value entries (Variants with -1 in position 3).
-    Gender variants (3-value entries where 3rd value is 0 or 1) produce:
-      - (monsNo, formNo, False) for gender=0
-      - (monsNo, formNo, True)  for gender=1
-    Plain 2-value entries produce (monsNo, formNo, False).
+    Returns a list of (monsNo, formNo, is_female, variantIdx) for every valid entry.
+
+    - 2-value (monsNo, formNo)                → female=False, variant=0
+    - 3-value (monsNo, formNo, gender)         → female=(gender==1), variant=0
+    - 4-value (monsNo, formNo, -1, variantIdx) → female=False, variant=variantIdx
     """
     entries = []
     for raw_line in path.read_text().splitlines():
         line = raw_line.split(";")[0].strip()
         if not line:
             continue
-        # Strip leading/trailing parens (some lines are missing the opening paren)
         line = line.lstrip("(").rstrip(")")
         parts = [p.strip() for p in line.split(",")]
         try:
@@ -54,16 +52,11 @@ def parse_video_order(path: Path) -> list[tuple[int, int, bool]]:
             continue
 
         if len(nums) == 2:
-            # (monsNo, formNo)
-            entries.append((nums[0], nums[1], False))
+            entries.append((nums[0], nums[1], False, 0))
         elif len(nums) == 3:
-            # (monsNo, formNo, genderVariant)  — genderVariant is 0 or 1
-            # Skip if it looks like a 4-value entry missing the last field
-            entries.append((nums[0], nums[1], nums[2] == 1))
+            entries.append((nums[0], nums[1], nums[2] == 1, 0))
         elif len(nums) == 4:
-            # (monsNo, formNo, genderVariant, variantIndex) — skip
-            continue
-        # anything else: skip
+            entries.append((nums[0], nums[1], False, nums[3]))
 
     return entries
 
@@ -150,18 +143,19 @@ def parse_pokedex(path: Path) -> dict[int, list[str]]:
 # ─── BUILD MAPPING: (monsNo, formNo, is_female) → showdown_name ──────────────
 
 def build_name_map(
-    order: list[tuple[int, int, bool]],
+    order: list[tuple[int, int, bool, int]],
     dex: dict[int, list[str]],
-) -> dict[tuple[int, int, bool], str]:
+) -> dict[tuple[int, int, bool, int], str]:
     """
     For each entry in the order list, resolve the Showdown name.
 
-    The formNo in video_order.txt directly corresponds to the index into
-    dex[num] — form 0 = first entry, form 1 = second entry, etc.
+    formNo maps directly to the dex form index.
+    Female variants get a -f suffix.
+    Cosmetic variants (variantIdx > 0) get a -vN suffix.
     """
-    name_map: dict[tuple[int, int, bool], str] = {}
+    name_map: dict[tuple[int, int, bool, int], str] = {}
 
-    for (mon, form, female) in order:
+    for (mon, form, female, variant) in order:
         names = dex.get(mon, [])
         if not names:
             base_name = f"mon{mon:04d}-form{form:02d}"
@@ -172,8 +166,13 @@ def build_name_map(
             # Name it after the base form (index 0) + the form number.
             base_name = names[0] + f"-form{form}"
 
-        showdown_name = base_name + ("-f" if female else "")
-        name_map[(mon, form, female)] = showdown_name
+        suffix = ""
+        if female:
+            suffix += "-f"
+        if variant > 0:
+            suffix += f"-v{variant}"
+
+        name_map[(mon, form, female, variant)] = base_name + suffix
 
     return name_map
 
@@ -294,8 +293,8 @@ def main():
     skipped = 0
 
     for gif in gif_files:
-        # Parse filename: NNNN_FF.gif or NNNN_FF_gG.gif
-        m = re.match(r'^(\d+)_(\d+)(?:_g(\d+))?\.gif$', gif.name)
+        # Parse filename: NNNN_FF.gif, NNNN_FF_gG.gif, NNNN_FF_vV.gif, or NNNN_FF_gG_vV.gif
+        m = re.match(r'^(\d+)_(\d+)(?:_g(\d+))?(?:_v(\d+))?\.gif$', gif.name)
         if not m:
             print(f"  SKIP (unexpected name): {gif.name}")
             skipped += 1
@@ -304,12 +303,13 @@ def main():
         mon = int(m.group(1))
         form = int(m.group(2))
         gender = int(m.group(3)) if m.group(3) is not None else 0
+        variant = int(m.group(4)) if m.group(4) is not None else 0
         female = (gender == 1)
-        key = (mon, form, female)
+        key = (mon, form, female, variant)
 
         showdown_name = name_map.get(key)
         if not showdown_name:
-            print(f"  SKIP (not in order list): {gif.name} → mon={mon} form={form} gender={gender}")
+            print(f"  SKIP (not in order list): {gif.name} → mon={mon} form={form} gender={gender} variant={variant}")
             skipped += 1
             continue
 
@@ -318,16 +318,17 @@ def main():
         # Find reference GIF
         ref_path = ani_files.get(showdown_name)
         if ref_path is None:
-            # Try stripping -f suffix (female variant → use male reference)
+            # Strip -f suffix (female → use male reference)
             base = showdown_name.removesuffix("-f")
             ref_path = ani_files.get(base)
         if ref_path is None:
-            # Try stripping custom form suffix (e.g. venusaur-form3 → venusaur)
-            base_form = re.sub(r'-form\d+(-f)?$', '', showdown_name)
-            ref_path = ani_files.get(base_form)
-            if ref_path is None:
-                # Also try without -f on the base form name
-                ref_path = ani_files.get(base_form.removesuffix("-f"))
+            # Strip -vN suffix (cosmetic variant → use base variant reference)
+            base = re.sub(r'-v\d+(-f)?$', '', showdown_name)
+            ref_path = ani_files.get(base)
+        if ref_path is None:
+            # Strip custom form suffix (e.g. venusaur-form3 → venusaur)
+            base = re.sub(r'-form\d+(-[fv]\d*)*$', '', showdown_name)
+            ref_path = ani_files.get(base)
 
         # Determine target size
         our_w, our_h = get_gif_size(gif)
