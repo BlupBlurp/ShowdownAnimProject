@@ -57,7 +57,7 @@ def frame_diff(img_a: Path, img_b: Path) -> float:
     return float(np.mean(np.abs(a - b)))
 
 
-def find_loop_point(frames: list[Path], threshold: float, min_loop_frames: int = 50) -> tuple[int, int] | None:
+def find_loop_point(frames: list[Path], threshold: float, min_loop_frames: int = 10) -> tuple[int, int] | None:
     print(f"  Scanning {len(frames)} frames for loop point (min_loop={min_loop_frames})...")
     # Pre-load all frames into memory as numpy arrays to avoid repeated disk I/O
     arrays = [np.array(Image.open(f).convert("RGB"), dtype=np.float32) for f in frames]
@@ -242,7 +242,7 @@ def main():
     parser.add_argument("--fuzz", type=int, default=30, help="Green screen fuzz tolerance (0-255)")
     parser.add_argument("--loop-threshold", type=float, default=5,
                         help="Max mean pixel diff to consider frames identical (default: 5)")
-    parser.add_argument("--min-loop-frames", type=int, default=50,
+    parser.add_argument("--min-loop-frames", type=int, default=10,
                         help="Minimum number of frames a loop must contain (default: 50)")
     args = parser.parse_args()
 
