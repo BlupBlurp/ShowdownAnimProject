@@ -6,12 +6,13 @@ Usage: python sprite_pipeline.py <input_video> [--output-dir ./output] [--greens
 source /mnt/SATA_SSD/Projects/BDSP_Mods/ShowdownAnimProject/venv/bin/activate.fish
 
 Stages:
-  1. Extract frames from video
-  2. Find loop point (two identical/similar frames)
-  3. Remove green screen (optional, after loop detection for better frame matching)
-  4. Crop to content bounds
-  5. Convert to GIF
-  6. [PLACEHOLDER] Rename from monID_formID to Showdown name
+    1. Extract frames from video
+    2. Find loop point (two identical/similar frames)
+    3. Remove green screen (optional, after loop detection for better frame matching)
+    4. Crop to content bounds
+    5. Convert to GIF
+    6. [PLACEHOLDER] Rename from monID_formID to Showdown name
+    7. TODO: Scale gifs down based on existing showdown ones
 """
 
 import argparse
