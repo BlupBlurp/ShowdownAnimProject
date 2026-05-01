@@ -22,6 +22,8 @@ from pathlib import Path
 from PIL import Image
 import numpy as np
 import shutil
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+import os
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 
@@ -106,46 +108,60 @@ def find_loop_point(frames: list[Path], threshold: float, min_loop_frames: int =
     return None
 
 
+def _remove_greenscreen_single(args):
+    frame, out_dir, fuzz = args
+    img = Image.open(frame).convert("RGBA")
+    data = np.array(img)
+    r, g, b = data[:,:,0].astype(int), data[:,:,1].astype(int), data[:,:,2].astype(int)
+    mask = (g - r > fuzz) & (g - b > fuzz)
+    data[mask, 3] = 0
+    out = out_dir / (frame.stem + ".png")
+    Image.fromarray(data).save(out)
+    return out
+
+
 def remove_greenscreen_pil(frames: list[Path], out_dir: Path, fuzz=30) -> list[Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
-    result_frames = []
-    for frame in frames:
-        img = Image.open(frame).convert("RGBA")
-        data = np.array(img)
-        r, g, b = data[:,:,0].astype(int), data[:,:,1].astype(int), data[:,:,2].astype(int)
-        mask = (g - r > fuzz) & (g - b > fuzz)
-        data[mask, 3] = 0
-        out = out_dir / (frame.stem + ".png")
-        Image.fromarray(data).save(out)
-        result_frames.append(out)
-    return result_frames
+    worker_count = min(os.cpu_count() or 4, len(frames))
+    args = [(f, out_dir, fuzz) for f in frames]
+    with ThreadPoolExecutor(max_workers=worker_count) as ex:
+        results = list(ex.map(_remove_greenscreen_single, args))
+    return results
+
+
+def _get_frame_bbox(frame: Path):
+    img = Image.open(frame).convert("RGBA")
+    return img.split()[3].getbbox()
 
 
 def crop_to_content(frames: list[Path], out_dir: Path) -> list[Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
-    min_x, min_y = float("inf"), float("inf")
-    max_x, max_y = 0, 0
-    for frame in frames:
-        img = Image.open(frame).convert("RGBA")
-        bbox = img.split()[3].getbbox()
-        if bbox is None:
-            continue
-        min_x = min(min_x, bbox[0])
-        min_y = min(min_y, bbox[1])
-        max_x = max(max_x, bbox[2])
-        max_y = max(max_y, bbox[3])
-    if min_x == float("inf"):
+    worker_count = min(os.cpu_count() or 4, len(frames))
+
+    with ThreadPoolExecutor(max_workers=worker_count) as ex:
+        bboxes = list(ex.map(_get_frame_bbox, frames))
+
+    valid = [b for b in bboxes if b is not None]
+    if not valid:
         print("  WARNING: No content found for crop, using full frame.")
         return frames
-    bbox = (int(min_x), int(min_y), int(max_x), int(max_y))
+
+    min_x = min(b[0] for b in valid)
+    min_y = min(b[1] for b in valid)
+    max_x = max(b[2] for b in valid)
+    max_y = max(b[3] for b in valid)
+    bbox = (min_x, min_y, max_x, max_y)
     print(f"  Crop box: {bbox}")
-    result_frames = []
-    for frame in frames:
+
+    def crop_one(frame):
         img = Image.open(frame).convert("RGBA")
         out = out_dir / frame.name
         img.crop(bbox).save(out)
-        result_frames.append(out)
-    return result_frames
+        return out
+
+    with ThreadPoolExecutor(max_workers=worker_count) as ex:
+        results = list(ex.map(crop_one, frames))
+    return results
 
 
 def to_palette_transparent(img: Image.Image) -> Image.Image:
@@ -189,7 +205,10 @@ def frames_to_gif(frames: list[Path], out_path: Path, fps=GIF_FPS):
     print(f"  GIF delay: {delay_cs}cs per frame ({100/delay_cs:.2f} fps effective)")
 
     images = [Image.open(f).convert("RGBA") for f in frames]
-    frames_p = [to_palette_transparent(img) for img in images]
+
+    worker_count = min(os.cpu_count() or 4, len(images))
+    with ThreadPoolExecutor(max_workers=worker_count) as ex:
+        frames_p = list(ex.map(to_palette_transparent, images))
 
     tmp_gif = out_path.with_suffix(".tmp.gif")
     frames_p[0].save(
@@ -209,10 +228,6 @@ def frames_to_gif(frames: list[Path], out_path: Path, fps=GIF_FPS):
     else:
         tmp_gif.rename(out_path)
         print("  gifsicle not found, skipping optimization")
-
-
-# ─── Showdown Rename (delegated to rename_sprites.py) ────────────────────────
-# Call rename_sprites.py after the pipeline to rename and resize all output GIFs.
 
 
 # ─── MAIN PIPELINE ───────────────────────────────────────────────────────────
@@ -256,25 +271,47 @@ def process(video_path: Path, output_dir: Path, use_greenscreen: bool, fuzz: int
     return gif_path
 
 
+def _process_worker(args):
+    """Top-level wrapper for ProcessPoolExecutor (must be picklable)."""
+    video_path, output_dir, use_greenscreen, fuzz, loop_threshold, min_loop_frames = args
+    return process(video_path, output_dir, use_greenscreen, fuzz, loop_threshold, min_loop_frames)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Sprite animation pipeline")
     parser.add_argument("inputs", nargs="+", type=Path, help="Input video file(s)")
     parser.add_argument("--output-dir", type=Path, default=Path("./output"))
     parser.add_argument("--greenscreen", action="store_true", help="Apply chroma key removal")
     parser.add_argument("--fuzz", type=int, default=30, help="Green screen fuzz tolerance (0-255)")
-    parser.add_argument("--loop-threshold", type=float, default=5,
-                        help="Max mean pixel diff to consider frames identical (default: 5)")
-    parser.add_argument("--min-loop-frames", type=int, default=20,
-                        help="Minimum number of frames a loop must contain (default: 50)")
+    parser.add_argument("--loop-threshold", type=float, default=5)
+    parser.add_argument("--min-loop-frames", type=int, default=20)
+    parser.add_argument("--workers", type=int, default=None,
+                        help="Max parallel videos (default: CPU count / 2)")
     args = parser.parse_args()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    for video in args.inputs:
-        if not video.exists():
-            print(f"ERROR: {video} not found", file=sys.stderr)
-            continue
-        process(video, args.output_dir, args.greenscreen, args.fuzz, args.loop_threshold, args.min_loop_frames)
+    videos = [v for v in args.inputs if v.exists() or print(f"ERROR: {v} not found", file=sys.stderr)]
+
+    if len(videos) == 1:
+        process(videos[0], args.output_dir, args.greenscreen, args.fuzz, args.loop_threshold, args.min_loop_frames)
+    else:
+        # Each video process() already uses threads internally, so limit outer parallelism
+        # to avoid thrashing (default: half of CPU count)
+        max_workers = args.workers or max(1, (os.cpu_count() or 2) // 2)
+        print(f"\nProcessing {len(videos)} videos with up to {max_workers} parallel workers...")
+        worker_args = [
+            (v, args.output_dir, args.greenscreen, args.fuzz, args.loop_threshold, args.min_loop_frames)
+            for v in videos
+        ]
+        with ProcessPoolExecutor(max_workers=max_workers) as ex:
+            futures = {ex.submit(_process_worker, a): a[0] for a in worker_args}
+            for fut in as_completed(futures):
+                vid = futures[fut]
+                try:
+                    fut.result()
+                except Exception as e:
+                    print(f"ERROR processing {vid}: {e}", file=sys.stderr)
 
     print("\nDone.")
 
