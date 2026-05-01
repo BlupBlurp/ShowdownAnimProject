@@ -58,29 +58,51 @@ def frame_diff(img_a: Path, img_b: Path) -> float:
 
 
 def find_loop_point(frames: list[Path], threshold: float, min_loop_frames: int = 20) -> tuple[int, int] | None:
-    print(f"  Scanning {len(frames)} frames for loop point (min_loop={min_loop_frames})...")
+    print(f"  Scanning {len(frames)} frames for loop point (min_loop={min_loop_frames}, threshold={threshold})...")
     # Pre-load all frames into memory as numpy arrays to avoid repeated disk I/O
     arrays = [np.array(Image.open(f).convert("RGB"), dtype=np.float32) for f in frames]
+    n = len(arrays)
 
-    # Find the shortest loop: scan all pairs, pick smallest (end - start) within threshold.
-    # min_loop_frames prevents trivially-short matches (e.g. two identical background frames).
+    # ── Strategy 1: anchor start=0, find best-matching end frame ──────────────
+    # The clip should start at the loop start. Scan all candidate end frames
+    # (beyond min_loop_frames) and pick the one closest to frame 0.
+    best_end = None
+    best_diff = float("inf")
+    for end in range(min_loop_frames, n):
+        diff = float(np.mean(np.abs(arrays[end] - arrays[0])))
+        if diff < best_diff:
+            best_diff = diff
+            best_end = end
+
+    if best_end is not None and best_diff <= threshold:
+        loop_len = best_end  # start=0, so length = end - 0
+        print(f"  Loop point found: frame 0 -> frame {best_end} ({loop_len} frames, diff={best_diff:.3f})")
+        return 0, best_end
+
+    # ── Strategy 2: full pair search, pick the pair with lowest diff ──────────
+    # Used when the clip doesn't start exactly at the loop start (e.g. there are
+    # a few lead-in frames). Find the globally best-matching pair.
+    print(f"  Frame 0 best match diff={best_diff:.3f} exceeds threshold. Trying full pair search...")
     best_start, best_end = None, None
-    best_len = float("inf")
-    for end in range(1, len(arrays)):
-        for start in range(0, end):
-            loop_len = end - start
-            if loop_len < min_loop_frames:
-                continue  # too short to be a real animation loop
-            if loop_len >= best_len:
-                continue  # already found a shorter valid loop
+    best_diff = float("inf")
+    for end in range(min_loop_frames, n):
+        for start in range(0, end - min_loop_frames + 1):
             diff = float(np.mean(np.abs(arrays[end] - arrays[start])))
-            if diff <= threshold:
+            if diff < best_diff:
+                best_diff = diff
                 best_start, best_end = start, end
-                best_len = loop_len
-    if best_start is not None:
-        print(f"  Loop point found: frame {best_start} -> frame {best_end} ({best_len} frames, diff<={threshold})")
+
+    if best_start is not None and best_diff <= threshold:
+        loop_len = best_end - best_start
+        print(f"  Loop point found: frame {best_start} -> frame {best_end} ({loop_len} frames, diff={best_diff:.3f})")
         return best_start, best_end
-    print(f"  WARNING: No loop point found within threshold={threshold}. Using full video.")
+
+    # ── No loop found ──────────────────────────────────────────────────────────
+    if best_start is not None:
+        print(f"  WARNING: Best match was frame {best_start}→{best_end} with diff={best_diff:.3f}, "
+              f"exceeds threshold={threshold}. Use --loop-threshold {best_diff:.1f} to accept it.")
+    else:
+        print(f"  WARNING: No loop point found. Using full video.")
     return None
 
 
