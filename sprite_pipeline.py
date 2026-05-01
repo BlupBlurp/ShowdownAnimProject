@@ -189,11 +189,8 @@ def frames_to_gif(frames: list[Path], out_path: Path, fps=GIF_FPS):
         print("  gifsicle not found, skipping optimization")
 
 
-# ─── PLACEHOLDER: Showdown Rename ────────────────────────────────────────────
-
-def resolve_showdown_name(mon_id: int, form_id: int) -> str:
-    # TODO: load Showdown dex JSON and map (mon_id, form_id) -> name string
-    return f"mon{mon_id:04d}_form{form_id:02d}"
+# ─── Showdown Rename (delegated to rename_sprites.py) ────────────────────────
+# Call rename_sprites.py after the pipeline to rename and resize all output GIFs.
 
 
 # ─── MAIN PIPELINE ───────────────────────────────────────────────────────────
@@ -231,8 +228,8 @@ def process(video_path: Path, output_dir: Path, use_greenscreen: bool, fuzz: int
     frames_to_gif(frames, gif_path)
     print(f"  Saved: {gif_path}")
 
-    print("\n[6] Rename (placeholder)...")
-    print(f"  Output filename: {name}.gif  ->  TODO: resolve Showdown name")
+    print("\n[6] Rename (run rename_sprites.py separately to rename and resize all output GIFs).")
+    print(f"  Output filename: {name}.gif  (use: python rename_sprites.py --output-dir {output_dir})")
 
     return gif_path
 

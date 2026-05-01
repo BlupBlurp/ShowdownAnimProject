@@ -5,13 +5,18 @@ Repeatedly records a fixed screen region using gpu-screen-recorder,
 injecting a keypress via evdev/uinput before each take.
 
 Usage:
-    python record_sprites.py [--output-dir ./input] [--prefix sprite] [--count N]
+    python record_sprites.py [--output-dir ./input] [--start-index N] [--count N]
+                             [--order ./References/video_order.txt]
+
+Files are named NNNN_FF.mp4 where NNNN=monsNo and FF=formNo, derived from
+References/video_order.txt. Gender variants (3-value entries) and 4-value
+Variant entries are skipped — they share the same recording as the base form.
 
 Each iteration:
   1. Press Z via uinput (evdev) — advances to next Pokémon
   2. Wait KEYPRESS_DELAY seconds for the game to register
   3. Record RECORD_SECONDS via gpu-screen-recorder
-  4. Save to output_dir/prefix_NNNN.mp4
+  4. Save to output_dir/NNNN_FF.mp4
   5. Repeat
 
 One-time setup:
@@ -19,6 +24,7 @@ One-time setup:
 """
 
 import argparse
+import re
 import signal
 import subprocess
 import sys
@@ -45,6 +51,43 @@ CAPTURE_Y      = MONITOR_Y + (SCREEN_H - CAPTURE_H) // 2   # 264
 RECORD_FPS     = 60
 RECORD_SECONDS = 5
 KEYPRESS_DELAY = 0.3   # seconds between Z press and recording start
+
+# ─── VIDEO ORDER PARSING ─────────────────────────────────────────────────────
+
+def parse_recording_order(path: Path) -> list[tuple[int, int, int]]:
+    """
+    Parse video_order.txt and return a list of (monsNo, formNo, genderVariant)
+    for every entry that needs its own recording.
+
+    Rules:
+    - 2-value entries (monsNo, formNo): record as (monsNo, formNo, 0)
+    - 3-value entries (monsNo, formNo, genderVariant): record — each gender is
+      a separate in-game entry with its own sprite
+    - 4-value entries (monsNo, formNo, -1, variantIdx): skip — cosmetic variants
+    """
+    order = []
+
+    for raw_line in path.read_text().splitlines():
+        line = raw_line.split(";")[0].strip()
+        if not line:
+            continue
+        line = line.lstrip("(").rstrip(")")
+        parts = [p.strip() for p in line.split(",")]
+        try:
+            nums = [int(p) for p in parts if p != ""]
+        except ValueError:
+            continue
+
+        if len(nums) == 2:
+            order.append((nums[0], nums[1], 0))
+        elif len(nums) == 3:
+            order.append((nums[0], nums[1], nums[2]))
+        elif len(nums) == 4:
+            # (monsNo, formNo, -1, variantIdx) — cosmetic variant, skip
+            continue
+
+    return order
+
 
 # ─── KEYPRESS via evdev/uinput ────────────────────────────────────────────────
 
@@ -77,7 +120,8 @@ def record_take(out_path: Path) -> bool:
 
     cmd = [
         "gpu-screen-recorder",
-        "-w", f"{CAPTURE_W}x{CAPTURE_H}+{CAPTURE_X}+{CAPTURE_Y}",
+        "-w", "region",
+        "-region", f"{CAPTURE_W}x{CAPTURE_H}+{CAPTURE_X}+{CAPTURE_Y}",
         "-f", str(RECORD_FPS),
         "-k", "av1",
         "-q", "very_high",
@@ -103,19 +147,28 @@ def main():
     parser = argparse.ArgumentParser(description="Looping sprite screen recorder (KDE Wayland)")
     parser.add_argument("--output-dir", type=Path, default=Path("./input"),
                         help="Directory to save recordings (default: ./input)")
-    parser.add_argument("--prefix", type=str, default="sprite",
-                        help="Filename prefix for recordings (default: sprite)")
-    parser.add_argument("--count", type=int, default=0,
-                        help="Number of takes (0 = infinite, Ctrl+C to stop)")
+    parser.add_argument("--order", type=Path, default=Path("./References/video_order.txt"),
+                        help="Path to video_order.txt")
     parser.add_argument("--start-index", type=int, default=0,
-                        help="Starting index for output filenames (default: 0)")
+                        help="Index into the order list to start from (default: 0)")
+    parser.add_argument("--count", type=int, default=0,
+                        help="Number of takes (0 = record all remaining, Ctrl+C to stop early)")
     args = parser.parse_args()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
+    print("Parsing video order...")
+    order = parse_recording_order(args.order)
+    total = len(order)
+    print(f"  {total} unique recordings needed")
+
+    start = args.start_index
+    end = total if args.count == 0 else min(total, start + args.count)
+    batch = order[start:end]
+
     print(f"Capture region : {CAPTURE_W}x{CAPTURE_H}+{CAPTURE_X}+{CAPTURE_Y}")
     print(f"Output dir     : {args.output_dir}")
-    print(f"Takes          : {'infinite' if args.count == 0 else args.count}")
+    print(f"Recording      : entries {start}–{end - 1} of {total - 1} ({len(batch)} takes)")
     print("Press Ctrl+C to stop.\n")
 
     print("Starting in ", end="", flush=True)
@@ -124,24 +177,24 @@ def main():
         time.sleep(1)
     print("Go!\n")
 
-    take = args.start_index
+    done = 0
     try:
-        while True:
-            out_path = args.output_dir / f"{args.prefix}_{take:04d}.mp4"
-            print(f"[Take {take}] Recording -> {out_path}")
+        for idx, (mon, form, gender) in enumerate(batch):
+            gender_suffix = f"_g{gender}" if gender > 0 else ""
+            out_path = args.output_dir / f"{mon:04d}_{form:02d}{gender_suffix}.mp4"
+            label = f"[{start + idx}/{total - 1}] mon={mon} form={form} gender={gender}"
+            print(f"{label} → {out_path.name}")
             success = record_take(out_path)
             if success:
-                print(f"[Take {take}] Saved: {out_path}")
+                print(f"  Saved: {out_path}")
             else:
-                print(f"[Take {take}] Failed.")
-            take += 1
-            if args.count > 0 and take >= args.start_index + args.count:
-                break
+                print(f"  Failed.")
+            done += 1
     except KeyboardInterrupt:
-        print(f"\nStopped after {take - args.start_index} take(s).")
+        print(f"\nStopped after {done} take(s).")
         sys.exit(0)
 
-    print(f"\nDone. {take - args.start_index} take(s) recorded.")
+    print(f"\nDone. {done} take(s) recorded.")
 
 
 if __name__ == "__main__":
