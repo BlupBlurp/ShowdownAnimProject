@@ -318,8 +318,16 @@ def main():
         # Find reference GIF
         ref_path = ani_files.get(showdown_name)
         if ref_path is None:
+            # Try stripping -f suffix (female variant → use male reference)
             base = showdown_name.removesuffix("-f")
             ref_path = ani_files.get(base)
+        if ref_path is None:
+            # Try stripping custom form suffix (e.g. venusaur-form3 → venusaur)
+            base_form = re.sub(r'-form\d+(-f)?$', '', showdown_name)
+            ref_path = ani_files.get(base_form)
+            if ref_path is None:
+                # Also try without -f on the base form name
+                ref_path = ani_files.get(base_form.removesuffix("-f"))
 
         # Determine target size
         our_w, our_h = get_gif_size(gif)
