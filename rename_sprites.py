@@ -65,17 +65,51 @@ def parse_video_order(path: Path) -> list[tuple[int, int, bool, int]]:
 # ─── PARSE pokedex.ts ────────────────────────────────────────────────────────
 
 def _showdown_name(raw: str) -> str:
-    """Convert a Showdown display name to its filename slug (lowercase, spaces→hyphens)."""
-    # Remove special unicode chars that appear in some names (e.g. Farfetch'd apostrophe)
+    """Convert a Showdown display name to a flat filename slug.
+
+    Rules (matching Pokémon Showdown's actual filenames):
+    - Lowercase throughout.
+    - Spaces become hyphens temporarily (removed in next step for base names,
+      kept as separator only when re-inserted by build_name_map for formes).
+    - ALL hyphens and non-alphanumeric characters are removed.
+    - Result is a flat alphanumeric string with NO hyphens.
+      The form-separator hyphen is re-inserted by build_name_map.
+
+    Examples:
+      "Charizard"        → "charizard"
+      "Charizard-Mega-X" → "charizard-megax"
+      "Ho-Oh"            → "hooh"
+      "Porygon-Z"        → "porygonz"
+      "Kommo-o"          → "kommoo"
+      "Mr. Mime"         → "mrmime"
+      "Farfetch'd"       → "farfetchd"
+    """
     name = raw.strip().strip('"').strip("'")
-    # Lowercase, replace spaces with hyphens, strip non-alphanumeric except hyphens
     name = name.lower()
-    name = name.replace(" ", "-")
-    # Remove characters that don't belong in filenames (apostrophes, dots, colons, etc.)
-    name = re.sub(r"[^a-z0-9\-]", "", name)
-    # Collapse multiple hyphens
-    name = re.sub(r"-+", "-", name)
+    # Keep only a-z and 0-9 — strip everything else (hyphens, spaces, apostrophes, dots, unicode)
+    name = re.sub(r"[^a-z0-9]", "", name)
     return name
+
+
+# Hardcoded overrides for custom Relumi forms that don't follow standard naming.
+# Applied after _showdown_name resolves the base name.
+_RELUMI_OVERRIDES: dict[str, str] = {
+    "venusaur-form3":        "venusaur-clone",
+    "blastoise-form3":       "blastoise-clone",
+    "charizard-form3":       "charizard-clone",
+    "pikachu-unova":         "pikachu-clone",
+    "pikachu-unova-f":       "pikachu-clone-f",
+    "eevee-form3":           "eevee-bandanapartner",
+    "eevee-form3-f":         "eevee-bandanapartner-f",
+    "onix-form1":            "onix-crystal",
+    "mewtwo-form5":          "mewtwo-shadow",
+    "gengar-form3":          "gengar-stitched",
+    "kabutops-form1":        "kabutops-missingno",
+    "groudon-form2":         "groudon-meta",
+    "lugia-form1":           "lugia-shadow",
+    "rayquaza-form2":        "rayquaza-illusory"
+
+}
 
 
 def parse_pokedex(path: Path) -> dict[int, list[str]]:
@@ -151,6 +185,9 @@ def build_name_map(
     For each entry in the order list, resolve the Showdown name.
 
     formNo maps directly to the dex form index.
+    - Form 0 is the base species slug (no hyphen), e.g. "charizard", "hooh".
+    - Form > 0 is a forme slug. The base species prefix is stripped and
+      re-attached with a hyphen separator, e.g. "charizardmegax" → "charizard-megax".
     Female variants get a -f suffix.
     Cosmetic variants (variantIdx > 0) get a -vN suffix.
     """
@@ -159,9 +196,22 @@ def build_name_map(
     for (mon, form, female, variant) in order:
         names = dex.get(mon, [])
         if not names:
-            base_name = f"mon{mon:04d}-form{form:02d}"
+            base_name = f"mon{mon:04d}form{form:02d}"
         elif form < len(names):
-            base_name = names[form]
+            flat = names[form]
+            if form == 0:
+                # Base species — no separator needed
+                base_name = flat
+            else:
+                # Forme — strip the base species prefix and re-insert hyphen separator.
+                # names[0] is the flat base slug (e.g. "charizard").
+                base_slug = names[0]
+                if flat.startswith(base_slug):
+                    forme_part = flat[len(base_slug):]  # e.g. "megax"
+                    base_name = base_slug + ("-" + forme_part if forme_part else "")
+                else:
+                    # Forme name doesn't share the base prefix (shouldn't happen, but safe fallback)
+                    base_name = flat
         else:
             # formNo exceeds known dex entries — custom/game-only form.
             # Name it after the base form (index 0) + the form number.
@@ -173,7 +223,9 @@ def build_name_map(
         if variant > 0:
             suffix += f"-v{variant}"
 
-        name_map[(mon, form, female, variant)] = base_name + suffix
+        name_map[(mon, form, female, variant)] = _RELUMI_OVERRIDES.get(
+            base_name + suffix, base_name + suffix
+        )
 
     return name_map
 
@@ -333,6 +385,11 @@ def main():
         if ref_path is None:
             # Strip custom form suffix (e.g. venusaur-form3 → venusaur)
             base = re.sub(r'-form\d+(-[fv]\d*)*$', '', showdown_name)
+            ref_path = ani_files.get(base)
+        if ref_path is None:
+            # Last resort: strip everything after the first hyphen → base species
+            # e.g. pikachu-clone → pikachu, charizard-megax → charizard
+            base = showdown_name.split("-")[0]
             ref_path = ani_files.get(base)
 
         # Determine target size
