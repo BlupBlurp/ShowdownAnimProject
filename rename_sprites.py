@@ -69,8 +69,7 @@ def _showdown_name(raw: str) -> str:
 
     Rules (matching Pokémon Showdown's actual filenames):
     - Lowercase throughout.
-    - Spaces become hyphens temporarily (removed in next step for base names,
-      kept as separator only when re-inserted by build_name_map for formes).
+    - JSON-style unicode escapes (e.g. \\u2019) are decoded before processing.
     - ALL hyphens and non-alphanumeric characters are removed.
     - Result is a flat alphanumeric string with NO hyphens.
       The form-separator hyphen is re-inserted by build_name_map.
@@ -82,9 +81,11 @@ def _showdown_name(raw: str) -> str:
       "Porygon-Z"        → "porygonz"
       "Kommo-o"          → "kommoo"
       "Mr. Mime"         → "mrmime"
-      "Farfetch'd"       → "farfetchd"
+      "Farfetch\\u2019d" → "farfetchd"
     """
     name = raw.strip().strip('"').strip("'")
+    # Decode JSON-style unicode escapes (literal \u2019 in the .ts source → actual char → stripped)
+    name = re.sub(r'\\u[0-9a-fA-F]{4}', '', name)
     name = name.lower()
     # Keep only a-z and 0-9 — strip everything else (hyphens, spaces, apostrophes, dots, unicode)
     name = re.sub(r"[^a-z0-9]", "", name)
@@ -96,7 +97,7 @@ def _showdown_name(raw: str) -> str:
 _RELUMI_OVERRIDES: dict[str, str] = {
     "venusaur-form3":        "venusaur-clone",
     "blastoise-form3":       "blastoise-clone",
-    "charizard-form3":       "charizard-clone",
+    "charizard-form4":       "charizard-clone",
     "pikachu-unova":         "pikachu-clone",
     "pikachu-unova-f":       "pikachu-clone-f",
     "eevee-form3":           "eevee-bandanapartner",
@@ -107,7 +108,8 @@ _RELUMI_OVERRIDES: dict[str, str] = {
     "kabutops-form1":        "kabutops-missingno",
     "groudon-form2":         "groudon-meta",
     "lugia-form1":           "lugia-shadow",
-    "rayquaza-form2":        "rayquaza-illusory"
+    "rayquaza-form2":        "rayquaza-illusory",
+    "marowak-alolatotem":    "marowak-ghost",
 
 }
 
