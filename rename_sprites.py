@@ -8,14 +8,15 @@ Usage:
     python rename_sprites.py [--output-dir ./output] [--ani-dir ./References/ani]
                              [--order ./References/video_order.txt]
                              [--pokedex ./References/pokedex.ts]
-                             [--dry-run]
+                             [--scale 1.0] [--dry-run]
 
 The script:
   1. Parses video_order.txt to map (monsNo, formNo, genderVariant) → sequential index
   2. Parses pokedex.ts to map num → ordered list of Showdown names
   3. For each NNNN_FF.gif in output-dir, resolves the Showdown name
   4. Finds the matching reference GIF in ani-dir
-  5. Resizes our GIF so its larger side matches the reference's larger side
+  5. Resizes our GIF so its larger side matches the reference's larger side,
+     then applies an optional --scale multiplier on top
   6. Renames the file
 """
 
@@ -267,6 +268,10 @@ def main():
     parser.add_argument("--pokedex", type=Path, default=Path("./References/pokedex.ts"))
     parser.add_argument("--dry-run", action="store_true",
                         help="Print what would happen without doing it")
+    parser.add_argument("--scale", type=float, default=1.0,
+                        help="Extra scale multiplier applied on top of the reference-matched size. "
+                             "E.g. 1.5 makes the output 1.5× larger than the reference size. "
+                             "Default: 1.0 (no extra scaling)")
     args = parser.parse_args()
 
     print("Parsing video_order.txt...")
@@ -339,6 +344,12 @@ def main():
         else:
             target_w, target_h = our_w, our_h
             size_note = f"{our_w}×{our_h} (no reference found)"
+
+        # Apply extra scale multiplier if requested
+        if args.scale != 1.0:
+            target_w = max(1, round(target_w * args.scale))
+            target_h = max(1, round(target_h * args.scale))
+            size_note += f" ×{args.scale} → {target_w}×{target_h}"
 
         needs_resize = (target_w != our_w or target_h != our_h)
 
