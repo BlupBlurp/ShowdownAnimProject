@@ -114,30 +114,45 @@ _RELUMI_OVERRIDES: dict[str, str] = {
 }
 
 
+def _parse_string_array(text: str, field: str) -> list[str]:
+    """Extract a string array field like formeOrder or cosmeticFormes from a block."""
+    m = re.search(r'\b' + field + r'\s*:\s*\[([^\]]*)\]', text, re.DOTALL)
+    if not m:
+        return []
+    return re.findall(r'"([^"]+)"', m.group(1))
+
+
 def parse_pokedex(path: Path) -> dict[int, list[str]]:
     """
-    Returns {num: [name_form0, name_form1, ...]} ordered by appearance in the file.
-    Entries with isCosmeticForme are skipped (they don't get their own GIF slot).
+    Returns {num: [name_form0, name_form1, ...]} in correct game form order.
+
+    Ordering rules:
+    1. If the base entry has formeOrder, use it to sort all collected names for
+       that num (covers Arceus and similar where alphabetical order is wrong).
+       formeOrder may be a subset (e.g. Charizard excludes Gmax) — names not in
+       formeOrder are appended after in their original order.
+    2. If the base entry has cosmeticFormes but no otherFormes (e.g. Unown),
+       include the cosmetic formes as additional form slots using formeOrder.
+    3. Entries with isCosmeticForme are still skipped (they have their own block
+       but are not separate GIF slots — except for the Unown special case above).
     """
     text = path.read_text(encoding="utf-8")
 
-    # Split into individual entries by top-level key
-    # Each entry looks like:   somekey: { ... },
-    # We'll extract num and name from each block
     result: dict[int, list[str]] = {}
+    # Store extra metadata from base entries for post-processing
+    forme_order_by_num: dict[int, list[str]] = {}   # formeOrder from base entry
+    cosmetic_formes_by_num: dict[int, list[str]] = {}  # cosmeticFormes from base entry
+    has_other_formes_by_num: set[int] = set()
 
     # Find all entry blocks: key: { ... }
-    # Use a simple state machine to handle nested braces
     entries_raw = []
     i = 0
     while i < len(text):
-        # Find start of an entry (identifier followed by colon and brace)
         m = re.search(r'\b(\w+)\s*:\s*\{', text[i:])
         if not m:
             break
         start = i + m.start()
-        brace_start = i + m.end() - 1  # position of '{'
-        # Walk to find matching closing brace
+        brace_start = i + m.end() - 1
         depth = 0
         j = brace_start
         while j < len(text):
@@ -154,17 +169,15 @@ def parse_pokedex(path: Path) -> dict[int, list[str]]:
             break
 
     for block in entries_raw:
-        # Skip cosmetic formes
+        # Skip cosmetic forme blocks (they share a dex slot but aren't separate GIFs)
         if "isCosmeticForme" in block:
             continue
 
-        # Extract num
         num_m = re.search(r'\bnum\s*:\s*(-?\d+)', block)
         if not num_m:
             continue
         num = int(num_m.group(1))
 
-        # Extract name
         name_m = re.search(r'\bname\s*:\s*"([^"]+)"', block)
         if not name_m:
             continue
@@ -173,6 +186,44 @@ def parse_pokedex(path: Path) -> dict[int, list[str]]:
         if num not in result:
             result[num] = []
         result[num].append(name)
+
+        # Collect formeOrder and cosmeticFormes from the base entry (no baseSpecies field)
+        if 'baseSpecies' not in block:
+            fo = _parse_string_array(block, 'formeOrder')
+            if fo:
+                forme_order_by_num[num] = [_showdown_name(n) for n in fo]
+            cf = _parse_string_array(block, 'cosmeticFormes')
+            if cf:
+                cosmetic_formes_by_num[num] = [_showdown_name(n) for n in cf]
+            if 'otherFormes' in block:
+                has_other_formes_by_num.add(num)
+
+    # Post-process: reorder by formeOrder where available
+    for num, fo in forme_order_by_num.items():
+        if num not in result:
+            continue
+        collected = result[num]
+        collected_set = set(collected)
+        # Names in formeOrder that we actually collected (preserves game order)
+        ordered = [n for n in fo if n in collected_set]
+        # Any collected names not covered by formeOrder go at the end
+        in_fo = set(fo)
+        extras = [n for n in collected if n not in in_fo]
+        result[num] = ordered + extras
+
+    # Post-process: for mons with cosmeticFormes but no otherFormes (e.g. Unown),
+    # append the cosmetic formes as additional form slots
+    for num, cf in cosmetic_formes_by_num.items():
+        if num in has_other_formes_by_num:
+            continue  # has real formes — cosmetic ones are truly cosmetic, skip
+        if num not in result:
+            continue
+        # Use formeOrder if available (already includes base + cosmetics in order)
+        fo = forme_order_by_num.get(num, [])
+        if fo:
+            result[num] = fo  # formeOrder already has base + all cosmetic slots
+        else:
+            result[num] = result[num] + cf
 
     return result
 
