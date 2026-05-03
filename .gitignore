@@ -3,3 +3,4 @@ input/
 output/
 References/ani/*
 References/ani-back/*
+__pycache__/

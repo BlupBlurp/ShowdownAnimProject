@@ -49,7 +49,7 @@ CAPTURE_X      = MONITOR_X + (SCREEN_W - CAPTURE_W) // 2   # 2671
 CAPTURE_Y      = MONITOR_Y + (SCREEN_H - CAPTURE_H) // 2   # 264
 
 RECORD_FPS     = 60
-RECORD_SECONDS = 5
+RECORD_SECONDS = 4
 KEYPRESS_DELAY = 0.3   # seconds between Z press and recording start
 
 # ─── VIDEO ORDER PARSING ─────────────────────────────────────────────────────

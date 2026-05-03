@@ -96,10 +96,16 @@ def _showdown_name(raw: str) -> str:
 # Applied after _showdown_name resolves the base name.
 _RELUMI_OVERRIDES: dict[str, str] = {
     "venusaur-form3":        "venusaur-clone",
+    "venusaur-form3-f":      "venusaur-clone-f",
     "blastoise-form3":       "blastoise-clone",
     "charizard-form4":       "charizard-clone",
-    "pikachu-unova":         "pikachu-clone",
-    "pikachu-unova-f":       "pikachu-clone-f",
+    "pikachu-rockstar":         "pikachu-clone",
+    "pikachu-rockstar-f":       "pikachu-clone-f",
+    "pikachu-alola":         "pikachu-libre",
+    "pikachu-unova":       "pikachu-popstar",
+    "pikachu-sinnoh":         "pikachu-belle",
+    "pikachu-kalos":       "pikachu-phd",
+    "pikachu-hoenn":         "pikachu-rockstar",
     "eevee-form3":           "eevee-bandanapartner",
     "eevee-form3-f":         "eevee-bandanapartner-f",
     "onix-form1":            "onix-crystal",
@@ -110,6 +116,12 @@ _RELUMI_OVERRIDES: dict[str, str] = {
     "lugia-form1":           "lugia-shadow",
     "rayquaza-form2":        "rayquaza-illusory",
     "marowak-alolatotem":    "marowak-ghost",
+    "miniormeteor-form8":    "minior-orange",
+    "miniormeteor-form9":    "minior-yellow",
+    "miniormeteor-form10":   "minior-green",
+    "miniormeteor-form11":   "minior-blue",
+    "miniormeteor-form12":   "minior-indigo",
+    "miniormeteor-form13":   "minior-violet",
 
 }
 

@@ -11,8 +11,6 @@ Stages:
     3. Remove green screen (optional, after loop detection for better frame matching)
     4. Crop to content bounds
     5. Convert to GIF
-    6. [PLACEHOLDER] Rename from monID_formID to Showdown name
-    7. TODO: Scale gifs down based on existing showdown ones
 """
 
 import argparse
@@ -28,18 +26,18 @@ import os
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 
 GREEN_COLOR = "0x00FF00"   # Adjust to your actual green screen hex
-CHROMA_SIMILARITY = 0.15   # ffmpeg chromakey similarity (0.0–1.0)
-CHROMA_BLEND = 0.05        # ffmpeg chromakey blend
+CHROMA_SIMILARITY = 0.15   # ffmpeg chromakey similarity (0.0–1.0) — unused, PIL path is active
+CHROMA_BLEND = 0.05        # ffmpeg chromakey blend — unused, PIL path is active
 GIF_FPS = 33.33            # Output GIF framerate
 
 # ─── HELPERS ─────────────────────────────────────────────────────────────────
 
-def run(cmd, check=True):
-    print(f"  $ {' '.join(str(c) for c in cmd)}")
+def run(cmd, log: list, check=True):
+    log.append(f"  $ {' '.join(str(c) for c in cmd)}")
     return subprocess.run(cmd, check=check, capture_output=True, text=True)
 
 
-def extract_frames(video_path: Path, out_dir: Path, fps=None) -> list[Path]:
+def extract_frames(video_path: Path, out_dir: Path, log: list, fps=None) -> list[Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     fps_filter = f"fps={fps}," if fps else ""
     run([
@@ -47,20 +45,12 @@ def extract_frames(video_path: Path, out_dir: Path, fps=None) -> list[Path]:
         "-vf", f"{fps_filter}scale=iw:ih",
         str(out_dir / "frame_%04d.png"),
         "-y"
-    ])
+    ], log)
     return sorted(out_dir.glob("frame_*.png"))
 
 
-def frame_diff(img_a: Path, img_b: Path) -> float:
-    a = np.array(Image.open(img_a).convert("RGB"), dtype=float)
-    b = np.array(Image.open(img_b).convert("RGB"), dtype=float)
-    if a.shape != b.shape:
-        return float("inf")
-    return float(np.mean(np.abs(a - b)))
-
-
-def find_loop_point(frames: list[Path], threshold: float, min_loop_frames: int = 20) -> tuple[int, int] | None:
-    print(f"  Scanning {len(frames)} frames for loop point (min_loop={min_loop_frames}, threshold={threshold})...")
+def find_loop_point(frames: list[Path], threshold: float, log: list, min_loop_frames: int = 20) -> tuple[int, int] | None:
+    log.append(f"  Scanning {len(frames)} frames for loop point (min_loop={min_loop_frames}, threshold={threshold})...")
     # Pre-load all frames into memory as numpy arrays to avoid repeated disk I/O
     arrays = [np.array(Image.open(f).convert("RGB"), dtype=np.float32) for f in frames]
     n = len(arrays)
@@ -78,13 +68,13 @@ def find_loop_point(frames: list[Path], threshold: float, min_loop_frames: int =
 
     if best_end is not None and best_diff <= threshold:
         loop_len = best_end  # start=0, so length = end - 0
-        print(f"  Loop point found: frame 0 -> frame {best_end} ({loop_len} frames, diff={best_diff:.3f})")
+        log.append(f"  Loop point found: frame 0 -> frame {best_end} ({loop_len} frames, diff={best_diff:.3f})")
         return 0, best_end
 
     # ── Strategy 2: full pair search, pick the pair with lowest diff ──────────
     # Used when the clip doesn't start exactly at the loop start (e.g. there are
     # a few lead-in frames). Find the globally best-matching pair.
-    print(f"  Frame 0 best match diff={best_diff:.3f} exceeds threshold. Trying full pair search...")
+    log.append(f"  Frame 0 best match diff={best_diff:.3f} exceeds threshold. Trying full pair search...")
     best_start, best_end = None, None
     best_diff = float("inf")
     for end in range(min_loop_frames, n):
@@ -96,15 +86,17 @@ def find_loop_point(frames: list[Path], threshold: float, min_loop_frames: int =
 
     if best_start is not None and best_diff <= threshold:
         loop_len = best_end - best_start
-        print(f"  Loop point found: frame {best_start} -> frame {best_end} ({loop_len} frames, diff={best_diff:.3f})")
+        log.append(f"  Loop point found: frame {best_start} -> frame {best_end} ({loop_len} frames, diff={best_diff:.3f})")
         return best_start, best_end
 
     # ── No loop found ──────────────────────────────────────────────────────────
     if best_start is not None:
-        print(f"  WARNING: Best match was frame {best_start}→{best_end} with diff={best_diff:.3f}, "
-              f"exceeds threshold={threshold}. Use --loop-threshold {best_diff:.1f} to accept it.")
+        log.append(
+            f"  WARNING: Best match was frame {best_start}→{best_end} with diff={best_diff:.3f}, "
+            f"exceeds threshold={threshold}. Use --loop-threshold {best_diff:.1f} to accept it."
+        )
     else:
-        print(f"  WARNING: No loop point found. Using full video.")
+        log.append("  WARNING: No loop point found. Using full video.")
     return None
 
 
@@ -120,7 +112,7 @@ def _remove_greenscreen_single(args):
     return out
 
 
-def remove_greenscreen_pil(frames: list[Path], out_dir: Path, fuzz=30) -> list[Path]:
+def remove_greenscreen_pil(frames: list[Path], out_dir: Path, log: list, fuzz=30) -> list[Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     worker_count = min(os.cpu_count() or 4, len(frames))
     args = [(f, out_dir, fuzz) for f in frames]
@@ -134,7 +126,7 @@ def _get_frame_bbox(frame: Path):
     return img.split()[3].getbbox()
 
 
-def crop_to_content(frames: list[Path], out_dir: Path) -> list[Path]:
+def crop_to_content(frames: list[Path], out_dir: Path, log: list) -> list[Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     worker_count = min(os.cpu_count() or 4, len(frames))
 
@@ -143,7 +135,7 @@ def crop_to_content(frames: list[Path], out_dir: Path) -> list[Path]:
 
     valid = [b for b in bboxes if b is not None]
     if not valid:
-        print("  WARNING: No content found for crop, using full frame.")
+        log.append("  WARNING: No content found for crop, using full frame.")
         return frames
 
     min_x = min(b[0] for b in valid)
@@ -151,7 +143,7 @@ def crop_to_content(frames: list[Path], out_dir: Path) -> list[Path]:
     max_x = max(b[2] for b in valid)
     max_y = max(b[3] for b in valid)
     bbox = (min_x, min_y, max_x, max_y)
-    print(f"  Crop box: {bbox}")
+    log.append(f"  Crop box: {bbox}")
 
     def crop_one(frame):
         img = Image.open(frame).convert("RGBA")
@@ -199,10 +191,10 @@ def to_palette_transparent(img: Image.Image) -> Image.Image:
     return result
 
 
-def frames_to_gif(frames: list[Path], out_path: Path, fps=GIF_FPS):
+def frames_to_gif(frames: list[Path], out_path: Path, log: list, fps=GIF_FPS):
     delay_cs = round(100 / fps)  # 100/33.33 = 3cs = 33.33fps
     duration_ms = delay_cs * 10
-    print(f"  GIF delay: {delay_cs}cs per frame ({100/delay_cs:.2f} fps effective)")
+    log.append(f"  GIF delay: {delay_cs}cs per frame ({100/delay_cs:.2f} fps effective)")
 
     images = [Image.open(f).convert("RGBA") for f in frames]
 
@@ -223,52 +215,57 @@ def frames_to_gif(frames: list[Path], out_path: Path, fps=GIF_FPS):
     )
 
     if shutil.which("gifsicle"):
-        run(["gifsicle", "--optimize=3", "--loop", f"--delay={delay_cs}", str(tmp_gif), "-o", str(out_path)])
+        run(["gifsicle", "--optimize=3", "--loop", f"--delay={delay_cs}", str(tmp_gif), "-o", str(out_path)], log)
         tmp_gif.unlink()
     else:
         tmp_gif.rename(out_path)
-        print("  gifsicle not found, skipping optimization")
+        log.append("  gifsicle not found, skipping optimization")
 
 
 # ─── MAIN PIPELINE ───────────────────────────────────────────────────────────
 
-def process(video_path: Path, output_dir: Path, use_greenscreen: bool, fuzz: int, loop_threshold: float, min_loop_frames: int):
+def process(video_path: Path, output_dir: Path, use_greenscreen: bool, fuzz: int, loop_threshold: float, min_loop_frames: int) -> tuple[Path, list[str]]:
+    """Run the full pipeline for one video. Returns (gif_path, log_lines).
+
+    All output is collected into log_lines rather than printed directly, so
+    that parallel runs don't interleave their output. The caller is responsible
+    for printing the log once the video is done.
+    """
+    log: list[str] = []
     name = video_path.stem
     work_dir = output_dir / name
-    print(f"\n{'='*60}")
-    print(f"Processing: {video_path.name}")
-    print(f"{'='*60}")
 
-    print("\n[1] Extracting frames...")
+    log.append(f"\n{'='*60}")
+    log.append(f"Processing: {video_path.name}")
+    log.append(f"{'='*60}")
+
+    log.append("\n[1] Extracting frames...")
     raw_dir = work_dir / "1_raw"
-    frames = extract_frames(video_path, raw_dir, fps=GIF_FPS)
-    print(f"  Extracted {len(frames)} frames")
+    frames = extract_frames(video_path, raw_dir, log, fps=GIF_FPS)
+    log.append(f"  Extracted {len(frames)} frames")
 
-    print("\n[2] Finding loop point...")
-    loop = find_loop_point(frames, loop_threshold, min_loop_frames=min_loop_frames)
+    log.append("\n[2] Finding loop point...")
+    loop = find_loop_point(frames, loop_threshold, log, min_loop_frames=min_loop_frames)
     if loop:
         start, end = loop
         frames = frames[start:end]
-        print(f"  Trimmed to {len(frames)} frames")
+        log.append(f"  Trimmed to {len(frames)} frames")
 
     if use_greenscreen:
-        print("\n[3] Removing green screen...")
+        log.append("\n[3] Removing green screen...")
         chroma_dir = work_dir / "2_chroma"
-        frames = remove_greenscreen_pil(frames, chroma_dir, fuzz=fuzz)
+        frames = remove_greenscreen_pil(frames, chroma_dir, log, fuzz=fuzz)
 
-    print("\n[4] Cropping to content...")
+    log.append("\n[4] Cropping to content...")
     crop_dir = work_dir / "3_cropped"
-    frames = crop_to_content(frames, crop_dir)
+    frames = crop_to_content(frames, crop_dir, log)
 
-    print("\n[5] Converting to GIF...")
+    log.append("\n[5] Converting to GIF...")
     gif_path = output_dir / f"{name}.gif"
-    frames_to_gif(frames, gif_path)
-    print(f"  Saved: {gif_path}")
+    frames_to_gif(frames, gif_path, log)
+    log.append(f"  Saved: {gif_path}")
 
-    print("\n[6] Rename (run rename_sprites.py separately to rename and resize all output GIFs).")
-    print(f"  Output filename: {name}.gif  (use: python rename_sprites.py --output-dir {output_dir})")
-
-    return gif_path
+    return gif_path, log
 
 
 def _process_worker(args):
@@ -294,7 +291,8 @@ def main():
     videos = [v for v in args.inputs if v.exists() or print(f"ERROR: {v} not found", file=sys.stderr)]
 
     if len(videos) == 1:
-        process(videos[0], args.output_dir, args.greenscreen, args.fuzz, args.loop_threshold, args.min_loop_frames)
+        _, log = process(videos[0], args.output_dir, args.greenscreen, args.fuzz, args.loop_threshold, args.min_loop_frames)
+        print("\n".join(log))
     else:
         # Each video process() already uses threads internally, so limit outer parallelism
         # to avoid thrashing (default: half of CPU count)
@@ -309,7 +307,8 @@ def main():
             for fut in as_completed(futures):
                 vid = futures[fut]
                 try:
-                    fut.result()
+                    _, log = fut.result()
+                    print("\n".join(log), flush=True)
                 except Exception as e:
                     print(f"ERROR processing {vid}: {e}", file=sys.stderr)
 
