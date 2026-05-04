@@ -92,6 +92,22 @@ def _showdown_name(raw: str) -> str:
     return name
 
 
+# Hardcoded overrides keyed by (monsNo, formNo) for cases where multiple game forms
+# map to the same Showdown name and can't be distinguished via _RELUMI_OVERRIDES.
+# Applied in build_name_map before the normal name-resolution path.
+# Female/variant suffixes are still appended after the override is applied.
+_FORM_OVERRIDES: dict[tuple[int, int], str] = {
+    # Minior Meteor colour variants — game forms 0–6 all resolve to "miniormeteor"
+    # from the pokedex formeOrder, so we override them explicitly here.
+    (774, 0): "minior-meteor",
+    (774, 1): "minior-meteororange",
+    (774, 2): "minior-meteoryellow",
+    (774, 3): "minior-meteorgreen",
+    (774, 4): "minior-meteorblue",
+    (774, 5): "minior-meteorindigo",
+    (774, 6): "minior-meteorviolet",
+}
+
 # Hardcoded overrides for custom Relumi forms that don't follow standard naming.
 # Applied after _showdown_name resolves the base name.
 _RELUMI_OVERRIDES: dict[str, str] = {
@@ -259,6 +275,19 @@ def build_name_map(
     name_map: dict[tuple[int, int, bool, int], str] = {}
 
     for (mon, form, female, variant) in order:
+        # Check for a direct (monsNo, formNo) override first
+        if (mon, form) in _FORM_OVERRIDES:
+            base_name = _FORM_OVERRIDES[(mon, form)]
+            suffix = ""
+            if female:
+                suffix += "-f"
+            if variant > 0:
+                suffix += f"-v{variant}"
+            name_map[(mon, form, female, variant)] = _RELUMI_OVERRIDES.get(
+                base_name + suffix, base_name + suffix
+            )
+            continue
+
         names = dex.get(mon, [])
         if not names:
             base_name = f"mon{mon:04d}form{form:02d}"
