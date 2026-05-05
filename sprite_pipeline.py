@@ -123,7 +123,19 @@ def remove_greenscreen_pil(frames: list[Path], out_dir: Path, log: list, fuzz=30
 
 def _get_frame_bbox(frame: Path):
     img = Image.open(frame).convert("RGBA")
-    return img.split()[3].getbbox()
+    alpha = np.array(img.split()[3])
+    # Use alpha > 4 threshold (same as center_sprite in rename_home.py) to ignore
+    # stray near-transparent fringe pixels that would expand the bbox to the full canvas.
+    mask = alpha > 4
+    rows = np.any(mask, axis=1)
+    cols = np.any(mask, axis=0)
+    if not rows.any():
+        return None
+    row_min = int(np.argmax(rows))
+    row_max = int(len(rows) - 1 - np.argmax(rows[::-1]))
+    col_min = int(np.argmax(cols))
+    col_max = int(len(cols) - 1 - np.argmax(cols[::-1]))
+    return (col_min, row_min, col_max + 1, row_max + 1)
 
 
 def crop_to_content(frames: list[Path], out_dir: Path, log: list) -> list[Path]:
@@ -224,6 +236,58 @@ def frames_to_gif(frames: list[Path], out_path: Path, log: list, fps=GIF_FPS):
 
 # ─── MAIN PIPELINE ───────────────────────────────────────────────────────────
 
+def process_corridor_key(frames_dir: Path, output_dir: Path, loop_threshold: float, min_loop_frames: int) -> tuple[Path, list[str]]:
+    """Pipeline for pre-processed CorridorKey frames (greenscreen already removed).
+
+    Skips frame extraction and greenscreen removal — frames are already RGBA PNGs.
+    Runs: loop detection → crop to content → convert to GIF.
+
+    Args:
+        frames_dir: Directory containing frame_NNNNNN.png files (e.g. input/CorridorKey/0743_00/)
+        output_dir: Root output directory (GIF saved as output_dir/<name>.gif)
+        loop_threshold: Max mean pixel diff to consider two frames identical
+        min_loop_frames: Minimum loop length to accept
+    """
+    log: list[str] = []
+    name = frames_dir.name
+    work_dir = output_dir / name
+
+    log.append(f"\n{'='*60}")
+    log.append(f"Processing (CorridorKey): {name}")
+    log.append(f"{'='*60}")
+
+    log.append("\n[1] Loading pre-processed frames...")
+    frames = sorted(frames_dir.glob("frame_*.png"))
+    if not frames:
+        log.append(f"  ERROR: No frame_*.png files found in {frames_dir}")
+        return output_dir / f"{name}.gif", log
+    log.append(f"  Found {len(frames)} frames")
+
+    log.append("\n[2] Finding loop point...")
+    loop = find_loop_point(frames, loop_threshold, log, min_loop_frames=min_loop_frames)
+    if loop:
+        start, end = loop
+        frames = frames[start:end]
+        log.append(f"  Trimmed to {len(frames)} frames")
+
+    log.append("\n[3] Cropping to content...")
+    crop_dir = work_dir / "3_cropped"
+    frames = crop_to_content(frames, crop_dir, log)
+
+    log.append("\n[4] Converting to GIF...")
+    gif_path = output_dir / f"{name}.gif"
+    frames_to_gif(frames, gif_path, log)
+    log.append(f"  Saved: {gif_path}")
+
+    return gif_path, log
+
+
+def _process_corridor_key_worker(args):
+    """Top-level wrapper for ProcessPoolExecutor (must be picklable)."""
+    frames_dir, output_dir, loop_threshold, min_loop_frames = args
+    return process_corridor_key(frames_dir, output_dir, loop_threshold, min_loop_frames)
+
+
 def process(video_path: Path, output_dir: Path, use_greenscreen: bool, fuzz: int, loop_threshold: float, min_loop_frames: int) -> tuple[Path, list[str]]:
     """Run the full pipeline for one video. Returns (gif_path, log_lines).
 
@@ -276,7 +340,7 @@ def _process_worker(args):
 
 def main():
     parser = argparse.ArgumentParser(description="Sprite animation pipeline")
-    parser.add_argument("inputs", nargs="+", type=Path, help="Input video file(s)")
+    parser.add_argument("inputs", nargs="*", type=Path, help="Input video file(s) — not used with --corridor-key")
     parser.add_argument("--output-dir", type=Path, default=Path("./output"))
     parser.add_argument("--greenscreen", action="store_true", help="Apply chroma key removal")
     parser.add_argument("--fuzz", type=int, default=30, help="Green screen fuzz tolerance (0-255)")
@@ -284,9 +348,54 @@ def main():
     parser.add_argument("--min-loop-frames", type=int, default=20)
     parser.add_argument("--workers", type=int, default=None,
                         help="Max parallel videos (default: CPU count / 2)")
+    parser.add_argument("--corridor-key", metavar="DIR", nargs="?", const="./input/CorridorKey",
+                        help="Process pre-keyed CorridorKey frame folders. "
+                             "Optionally specify the root directory (default: ./input/CorridorKey). "
+                             "Each subdirectory is treated as one sprite (greenscreen already removed).")
     args = parser.parse_args()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── CorridorKey mode ──────────────────────────────────────────────────────
+    if args.corridor_key is not None:
+        ck_root = Path(args.corridor_key)
+        if not ck_root.is_dir():
+            print(f"ERROR: CorridorKey directory not found: {ck_root}", file=sys.stderr)
+            sys.exit(1)
+
+        sprite_dirs = sorted(d for d in ck_root.iterdir() if d.is_dir())
+        if not sprite_dirs:
+            print(f"ERROR: No subdirectories found in {ck_root}", file=sys.stderr)
+            sys.exit(1)
+
+        print(f"\nCorridorKey mode: found {len(sprite_dirs)} sprite folder(s) in {ck_root}")
+
+        if len(sprite_dirs) == 1:
+            _, log = process_corridor_key(sprite_dirs[0], args.output_dir, args.loop_threshold, args.min_loop_frames)
+            print("\n".join(log))
+        else:
+            max_workers = args.workers or max(1, (os.cpu_count() or 2) // 2)
+            print(f"Processing with up to {max_workers} parallel workers...")
+            worker_args = [
+                (d, args.output_dir, args.loop_threshold, args.min_loop_frames)
+                for d in sprite_dirs
+            ]
+            with ProcessPoolExecutor(max_workers=max_workers) as ex:
+                futures = {ex.submit(_process_corridor_key_worker, a): a[0] for a in worker_args}
+                for fut in as_completed(futures):
+                    sprite_dir = futures[fut]
+                    try:
+                        _, log = fut.result()
+                        print("\n".join(log), flush=True)
+                    except Exception as e:
+                        print(f"ERROR processing {sprite_dir}: {e}", file=sys.stderr)
+
+        print("\nDone.")
+        return
+
+    # ── Normal video mode ─────────────────────────────────────────────────────
+    if not args.inputs:
+        parser.error("Provide input video file(s), or use --corridor-key for pre-keyed frames.")
 
     videos = [v for v in args.inputs if v.exists() or print(f"ERROR: {v} not found", file=sys.stderr)]
 
