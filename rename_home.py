@@ -244,7 +244,11 @@ def main():
             skipped += 1
             continue
 
-        full_name = cream_base + sweet_suffix
+        # When a sweet suffix is present the cream form's internal hyphen is dropped:
+        # e.g. "alcremie-rubycream" + "-berry" → "alcremierubycream-berry"
+        # The base (strawberry sweet, no suffix) keeps its hyphen: "alcremie-rubycream"
+        prefix = cream_base.replace("-", "") if sweet_suffix else cream_base
+        full_name = prefix + sweet_suffix
         dest_dir  = out_shiny if is_shiny else out_normal
         dest      = dest_dir / f"{full_name}.png"
         label     = f"{'[shiny] ' if is_shiny else ''}{png.name} → {dest.relative_to(args.output_dir)}"

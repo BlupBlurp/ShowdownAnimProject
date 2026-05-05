@@ -295,7 +295,10 @@ def build_name_map(
             if female:
                 suffix += "-f"
             if mon == 869 and variant in _ALCREMIE_SWEET_SUFFIXES:
-                suffix += _ALCREMIE_SWEET_SUFFIXES[variant]
+                sweet = _ALCREMIE_SWEET_SUFFIXES[variant]
+                suffix += sweet
+                if sweet:
+                    base_name = base_name.replace("-", "")
             elif variant > 0:
                 suffix += f"-v{variant}"
             name_map[(mon, form, female, variant)] = _RELUMI_OVERRIDES.get(
@@ -331,7 +334,13 @@ def build_name_map(
             suffix += "-f"
         if mon == 869 and variant in _ALCREMIE_SWEET_SUFFIXES:
             # Alcremie: variantIdx encodes the sweet decoration, not a cosmetic variant.
-            suffix += _ALCREMIE_SWEET_SUFFIXES[variant]
+            sweet = _ALCREMIE_SWEET_SUFFIXES[variant]
+            suffix += sweet
+            # When a sweet suffix is present the cream form's internal hyphen is dropped:
+            # "alcremie-rubycream" + "-berry" → "alcremierubycream-berry"
+            # Strawberry sweet (no suffix) keeps the hyphen: "alcremie-rubycream"
+            if sweet:
+                base_name = base_name.replace("-", "")
         elif variant > 0:
             suffix += f"-v{variant}"
 
@@ -499,10 +508,27 @@ def main():
             base = re.sub(r'-form\d+(-[fv]\d*)*$', '', showdown_name)
             ref_path = ani_files.get(base)
         if ref_path is None:
-            # Last resort: strip everything after the first hyphen → base species
-            # e.g. pikachu-clone → pikachu, charizard-megax → charizard
+            # Progressive fallback: repeatedly strip the last hyphen-separated token
+            # until a match is found or nothing is left.
+            # Handles fused names like "alcremierubycream-berry" → strip "-berry"
+            # → "alcremierubycream" (no match) → no more hyphens → falls through.
+            # Also handles "alcremie-rubycream-berry" → "alcremie-rubycream" → "alcremie".
+            base = showdown_name
+            while "-" in base and ref_path is None:
+                base = base.rsplit("-", 1)[0]
+                ref_path = ani_files.get(base)
+        if ref_path is None:
+            # Final resort: base species only (strip everything, keep first word).
+            # For fused names with no hyphen (e.g. "alcremierubycream") this won't
+            # help, so also try known base-species prefixes by checking ani_files
+            # for any key that is a prefix of the fused name.
             base = showdown_name.split("-")[0]
             ref_path = ani_files.get(base)
+            if ref_path is None:
+                for key in ani_files:
+                    if "-" not in key and showdown_name.startswith(key):
+                        ref_path = ani_files[key]
+                        break
 
         # Determine target size
         our_w, our_h = get_gif_size(gif)
