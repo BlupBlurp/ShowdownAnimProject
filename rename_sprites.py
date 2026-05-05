@@ -92,6 +92,19 @@ def _showdown_name(raw: str) -> str:
     return name
 
 
+# Alcremie sweet decoration suffixes, indexed by variantIdx (0–6).
+# variantIdx 0 = Strawberry Sweet = no suffix (base name only).
+# variantIdx 1–6 map to the remaining six sweets in game order.
+_ALCREMIE_SWEET_SUFFIXES: dict[int, str] = {
+    0: "",           # Strawberry Sweet — base name, no suffix
+    1: "-berry",     # Berry Sweet
+    2: "-love",      # Love Sweet
+    3: "-star",      # Star Sweet
+    4: "-clover",    # Clover Sweet
+    5: "-flower",    # Flower Sweet
+    6: "-ribbon",    # Ribbon Sweet
+}
+
 # Hardcoded overrides keyed by (monsNo, formNo) for cases where multiple game forms
 # map to the same Showdown name and can't be distinguished via _RELUMI_OVERRIDES.
 # Applied in build_name_map before the normal name-resolution path.
@@ -100,12 +113,12 @@ _FORM_OVERRIDES: dict[tuple[int, int], str] = {
     # Minior Meteor colour variants — game forms 0–6 all resolve to "miniormeteor"
     # from the pokedex formeOrder, so we override them explicitly here.
     (774, 0): "minior-meteor",
-    (774, 1): "minior-meteororange",
-    (774, 2): "minior-meteoryellow",
-    (774, 3): "minior-meteorgreen",
-    (774, 4): "minior-meteorblue",
-    (774, 5): "minior-meteorindigo",
-    (774, 6): "minior-meteorviolet",
+    (774, 1): "minior-orangemeteor",
+    (774, 2): "minior-yellowmeteor",
+    (774, 3): "minior-greenmeteor",
+    (774, 4): "minior-bluemeteor",
+    (774, 5): "minior-indigometeor",
+    (774, 6): "minior-violetmeteor",
 }
 
 # Hardcoded overrides for custom Relumi forms that don't follow standard naming.
@@ -281,7 +294,9 @@ def build_name_map(
             suffix = ""
             if female:
                 suffix += "-f"
-            if variant > 0:
+            if mon == 869 and variant in _ALCREMIE_SWEET_SUFFIXES:
+                suffix += _ALCREMIE_SWEET_SUFFIXES[variant]
+            elif variant > 0:
                 suffix += f"-v{variant}"
             name_map[(mon, form, female, variant)] = _RELUMI_OVERRIDES.get(
                 base_name + suffix, base_name + suffix
@@ -314,7 +329,10 @@ def build_name_map(
         suffix = ""
         if female:
             suffix += "-f"
-        if variant > 0:
+        if mon == 869 and variant in _ALCREMIE_SWEET_SUFFIXES:
+            # Alcremie: variantIdx encodes the sweet decoration, not a cosmetic variant.
+            suffix += _ALCREMIE_SWEET_SUFFIXES[variant]
+        elif variant > 0:
             suffix += f"-v{variant}"
 
         name_map[(mon, form, female, variant)] = _RELUMI_OVERRIDES.get(

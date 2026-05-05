@@ -100,13 +100,18 @@ def center_sprite(img: Image.Image) -> Image.Image:
     """
     Center the non-transparent content of an RGBA image on its canvas.
     The canvas size is preserved.
+
+    Alpha threshold is 4 (not 0) to ignore stray near-transparent fringe pixels
+    (alpha=1–4) that HOME sprites carry at canvas edges as anti-aliasing artefacts.
+    These pixels would otherwise expand the bounding box to the full canvas and
+    prevent centering from working correctly.
     """
     canvas_w, canvas_h = img.size
     data = np.array(img.convert("RGBA"))
     alpha = data[:, :, 3]
 
-    rows = np.any(alpha > 0, axis=1)
-    cols = np.any(alpha > 0, axis=0)
+    rows = np.any(alpha > 4, axis=1)
+    cols = np.any(alpha > 4, axis=0)
 
     if not rows.any():
         return img  # fully transparent, nothing to center
@@ -123,6 +128,25 @@ def center_sprite(img: Image.Image) -> Image.Image:
     result = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
     result.paste(content, (paste_x, paste_y))
     return result
+
+
+# ─── ALCREMIE SWEET DECORATION MAPPING ───────────────────────────────────────
+
+# Alcremie cream-form index → Showdown base name.
+# The cream forms are cosmeticFormes in pokedex.ts so parse_pokedex (which skips
+# isCosmeticForme blocks) only returns the base entry.  We hardcode the mapping
+# here so rename_home.py doesn't need the full cosmetic-forme expansion logic.
+_ALCREMIE_CREAM_FORMS: dict[int, str] = {
+    0: "alcremie",
+    1: "alcremie-rubycream",
+    2: "alcremie-matchacream",
+    3: "alcremie-mintcream",
+    4: "alcremie-lemoncream",
+    5: "alcremie-saltedcream",
+    6: "alcremie-rubyswirl",
+    7: "alcremie-caramelswirl",
+    8: "alcremie-rainbowswirl",
+}
 
 
 # ─── MAIN ────────────────────────────────────────────────────────────────────
@@ -146,23 +170,30 @@ def main():
         out_normal.mkdir(parents=True, exist_ok=True)
         out_shiny.mkdir(parents=True, exist_ok=True)
 
-    # Collect all PNGs and group by (mon, form)
+    # Collect all PNGs and split Alcremie (4-field names) from the rest
     pngs = sorted(args.input_dir.glob("*.png"))
     if not pngs:
         print(f"No PNGs found in {args.input_dir}")
         sys.exit(0)
 
     # Build a map: (mon, form) → {variant_str: Path}
+    # Alcremie files (pm0869_...) are handled separately below because they use
+    # a 4-field naming scheme: pm0869_FF_NS_SS where NS=10/11 (normal/shiny)
+    # and SS=00-06 (sweet index, optional — absent means strawberry sweet).
     from collections import defaultdict
     groups: dict[tuple[int, int], dict[str, Path]] = defaultdict(dict)
+    alcremie_pngs: list[Path] = []
     unparsed = []
     for png in pngs:
         m = re.match(r'^pm(\d{4})_(\d{2})_(\d{2})', png.name)
         if not m:
             unparsed.append(png)
             continue
-        mon     = int(m.group(1))
-        form    = int(m.group(2))
+        mon  = int(m.group(1))
+        form = int(m.group(2))
+        if mon == 869:
+            alcremie_pngs.append(png)
+            continue
         variant = m.group(3)
         groups[(mon, form)][variant] = png
 
@@ -170,6 +201,62 @@ def main():
         print(f"  SKIP (unexpected name): {png.name}")
 
     processed = skipped = 0
+
+    # ── Alcremie special case ─────────────────────────────────────────────────
+    # Filename format: pm0869_FF_NS[_SS].png
+    #   FF = cream form index (00–08)
+    #   NS = 10 (normal) or 11 (shiny)
+    #   SS = sweet index 00–06 (absent = strawberry sweet, same as 00)
+    # Sweet index → suffix: 00/absent=strawberry (no suffix), 01=berry, 02=love,
+    #   03=star, 04=clover, 05=flower, 06=ribbon.
+    # The cream forms are cosmeticFormes in pokedex.ts so we use the hardcoded
+    # _ALCREMIE_CREAM_FORMS table instead of the dex lookup.
+    _ALCREMIE_SWEET_INDEX_TO_SUFFIX: dict[int, str] = {
+        0: "",          # Strawberry Sweet — no suffix (base name)
+        1: "-berry",    # Berry Sweet
+        2: "-love",     # Love Sweet
+        3: "-star",     # Star Sweet
+        4: "-clover",   # Clover Sweet
+        5: "-flower",   # Flower Sweet
+        6: "-ribbon",   # Ribbon Sweet
+    }
+    for png in sorted(alcremie_pngs):
+        # Match both 3-field (pm0869_FF_NS) and 4-field (pm0869_FF_NS_SS) names
+        m = re.match(r'^pm0869_(\d{2})_(10|11)(?:_(\d{2}))?', png.name)
+        if not m:
+            print(f"  SKIP (unexpected Alcremie name): {png.name}")
+            skipped += 1
+            continue
+
+        form      = int(m.group(1))
+        is_shiny  = m.group(2) == "11"
+        sweet_idx = int(m.group(3)) if m.group(3) is not None else 0
+
+        cream_base = _ALCREMIE_CREAM_FORMS.get(form)
+        if cream_base is None:
+            print(f"  SKIP (unknown Alcremie cream form {form}): {png.name}")
+            skipped += 1
+            continue
+
+        sweet_suffix = _ALCREMIE_SWEET_INDEX_TO_SUFFIX.get(sweet_idx)
+        if sweet_suffix is None:
+            print(f"  SKIP (unknown Alcremie sweet index {sweet_idx}): {png.name}")
+            skipped += 1
+            continue
+
+        full_name = cream_base + sweet_suffix
+        dest_dir  = out_shiny if is_shiny else out_normal
+        dest      = dest_dir / f"{full_name}.png"
+        label     = f"{'[shiny] ' if is_shiny else ''}{png.name} → {dest.relative_to(args.output_dir)}"
+
+        if not args.dry_run:
+            img = Image.open(png).convert("RGBA")
+            centered = center_sprite(img)
+            centered.save(dest, optimize=True)
+
+        print(f"  {label}")
+        processed += 1
+    # ── end Alcremie ──────────────────────────────────────────────────────────
 
     for (mon, form), variants in sorted(groups.items()):
         # Look up Showdown name — skip if form not in dex
