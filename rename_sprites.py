@@ -29,6 +29,14 @@ from pathlib import Path
 from PIL import Image
 import numpy as np
 
+from pokedex_names import (
+    parse_pokedex,
+    resolve_showdown_name,
+    ALCREMIE_SWEET_SUFFIXES,
+    FORM_OVERRIDES,
+    RELUMI_OVERRIDES,
+)
+
 
 # ─── PARSE video_order.txt ───────────────────────────────────────────────────
 
@@ -62,293 +70,21 @@ def parse_video_order(path: Path) -> list[tuple[int, int, bool, int]]:
     return entries
 
 
-# ─── PARSE pokedex.ts ────────────────────────────────────────────────────────
-
-def _showdown_name(raw: str) -> str:
-    """Convert a Showdown display name to a flat filename slug.
-
-    Rules (matching Pokémon Showdown's actual filenames):
-    - Lowercase throughout.
-    - JSON-style unicode escapes (e.g. \\u2019) are decoded before processing.
-    - ALL hyphens and non-alphanumeric characters are removed.
-    - Result is a flat alphanumeric string with NO hyphens.
-      The form-separator hyphen is re-inserted by build_name_map.
-
-    Examples:
-      "Charizard"        → "charizard"
-      "Charizard-Mega-X" → "charizard-megax"
-      "Ho-Oh"            → "hooh"
-      "Porygon-Z"        → "porygonz"
-      "Kommo-o"          → "kommoo"
-      "Mr. Mime"         → "mrmime"
-      "Farfetch\\u2019d" → "farfetchd"
-    """
-    name = raw.strip().strip('"').strip("'")
-    # Decode JSON-style unicode escapes (literal \u2019 in the .ts source → actual char → stripped)
-    name = re.sub(r'\\u[0-9a-fA-F]{4}', '', name)
-    name = name.lower()
-    # Keep only a-z and 0-9 — strip everything else (hyphens, spaces, apostrophes, dots, unicode)
-    name = re.sub(r"[^a-z0-9]", "", name)
-    return name
-
-
-# Alcremie sweet decoration suffixes, indexed by variantIdx (0–6).
-# variantIdx 0 = Strawberry Sweet = no suffix (base name only).
-# variantIdx 1–6 map to the remaining six sweets in game order.
-_ALCREMIE_SWEET_SUFFIXES: dict[int, str] = {
-    0: "",           # Strawberry Sweet — base name, no suffix
-    1: "-berry",     # Berry Sweet
-    2: "-love",      # Love Sweet
-    3: "-star",      # Star Sweet
-    4: "-clover",    # Clover Sweet
-    5: "-flower",    # Flower Sweet
-    6: "-ribbon",    # Ribbon Sweet
-}
-
-# Hardcoded overrides keyed by (monsNo, formNo) for cases where multiple game forms
-# map to the same Showdown name and can't be distinguished via _RELUMI_OVERRIDES.
-# Applied in build_name_map before the normal name-resolution path.
-# Female/variant suffixes are still appended after the override is applied.
-_FORM_OVERRIDES: dict[tuple[int, int], str] = {
-    # Minior Meteor colour variants — game forms 0–6 all resolve to "miniormeteor"
-    # from the pokedex formeOrder, so we override them explicitly here.
-    (774, 0): "minior-meteor",
-    (774, 1): "minior-orangemeteor",
-    (774, 2): "minior-yellowmeteor",
-    (774, 3): "minior-greenmeteor",
-    (774, 4): "minior-bluemeteor",
-    (774, 5): "minior-indigometeor",
-    (774, 6): "minior-violetmeteor",
-}
-
-# Hardcoded overrides for custom Relumi forms that don't follow standard naming.
-# Applied after _showdown_name resolves the base name.
-_RELUMI_OVERRIDES: dict[str, str] = {
-    "venusaur-form3":        "venusaur-clone",
-    "venusaur-form3-f":      "venusaur-clone-f",
-    "blastoise-form3":       "blastoise-clone",
-    "charizard-form4":       "charizard-clone",
-    "pikachu-rockstar":         "pikachu-clone",
-    "pikachu-rockstar-f":       "pikachu-clone-f",
-    "pikachu-alola":         "pikachu-libre",
-    "pikachu-unova":       "pikachu-popstar",
-    "pikachu-sinnoh":         "pikachu-belle",
-    "pikachu-kalos":       "pikachu-phd",
-    "pikachu-hoenn":         "pikachu-rockstar",
-    "eevee-form3":           "eevee-bandanapartner",
-    "eevee-form3-f":         "eevee-bandanapartner-f",
-    "onix-form1":            "onix-crystal",
-    "mewtwo-form5":          "mewtwo-shadow",
-    "gengar-form3":          "gengar-stitched",
-    "kabutops-form1":        "kabutops-missingno",
-    "groudon-form2":         "groudon-meta",
-    "lugia-form1":           "lugia-shadow",
-    "rayquaza-form2":        "rayquaza-illusory",
-    "marowak-alolatotem":    "marowak-ghost",
-    "miniormeteor-form8":    "minior-orange",
-    "miniormeteor-form9":    "minior-yellow",
-    "miniormeteor-form10":   "minior-green",
-    "miniormeteor-form11":   "minior-blue",
-    "miniormeteor-form12":   "minior-indigo",
-    "miniormeteor-form13":   "minior-violet",
-
-}
-
-
-def _parse_string_array(text: str, field: str) -> list[str]:
-    """Extract a string array field like formeOrder or cosmeticFormes from a block."""
-    m = re.search(r'\b' + field + r'\s*:\s*\[([^\]]*)\]', text, re.DOTALL)
-    if not m:
-        return []
-    return re.findall(r'"([^"]+)"', m.group(1))
-
-
-def parse_pokedex(path: Path) -> dict[int, list[str]]:
-    """
-    Returns {num: [name_form0, name_form1, ...]} in correct game form order.
-
-    Ordering rules:
-    1. If the base entry has formeOrder, use it to sort all collected names for
-       that num (covers Arceus and similar where alphabetical order is wrong).
-       formeOrder may be a subset (e.g. Charizard excludes Gmax) — names not in
-       formeOrder are appended after in their original order.
-    2. If the base entry has cosmeticFormes but no otherFormes (e.g. Unown),
-       include the cosmetic formes as additional form slots using formeOrder.
-    3. Entries with isCosmeticForme are still skipped (they have their own block
-       but are not separate GIF slots — except for the Unown special case above).
-    """
-    text = path.read_text(encoding="utf-8")
-
-    result: dict[int, list[str]] = {}
-    # Store extra metadata from base entries for post-processing
-    forme_order_by_num: dict[int, list[str]] = {}   # formeOrder from base entry
-    cosmetic_formes_by_num: dict[int, list[str]] = {}  # cosmeticFormes from base entry
-    has_other_formes_by_num: set[int] = set()
-
-    # Find all entry blocks: key: { ... }
-    entries_raw = []
-    i = 0
-    while i < len(text):
-        m = re.search(r'\b(\w+)\s*:\s*\{', text[i:])
-        if not m:
-            break
-        start = i + m.start()
-        brace_start = i + m.end() - 1
-        depth = 0
-        j = brace_start
-        while j < len(text):
-            if text[j] == '{':
-                depth += 1
-            elif text[j] == '}':
-                depth -= 1
-                if depth == 0:
-                    entries_raw.append(text[start:j + 1])
-                    i = j + 1
-                    break
-            j += 1
-        else:
-            break
-
-    for block in entries_raw:
-        # Skip cosmetic forme blocks (they share a dex slot but aren't separate GIFs)
-        if "isCosmeticForme" in block:
-            continue
-
-        num_m = re.search(r'\bnum\s*:\s*(-?\d+)', block)
-        if not num_m:
-            continue
-        num = int(num_m.group(1))
-
-        name_m = re.search(r'\bname\s*:\s*"([^"]+)"', block)
-        if not name_m:
-            continue
-        name = _showdown_name(name_m.group(1))
-
-        if num not in result:
-            result[num] = []
-        result[num].append(name)
-
-        # Collect formeOrder and cosmeticFormes from the base entry (no baseSpecies field)
-        if 'baseSpecies' not in block:
-            fo = _parse_string_array(block, 'formeOrder')
-            if fo:
-                forme_order_by_num[num] = [_showdown_name(n) for n in fo]
-            cf = _parse_string_array(block, 'cosmeticFormes')
-            if cf:
-                cosmetic_formes_by_num[num] = [_showdown_name(n) for n in cf]
-            if 'otherFormes' in block:
-                has_other_formes_by_num.add(num)
-
-    # Post-process: reorder by formeOrder where available
-    for num, fo in forme_order_by_num.items():
-        if num not in result:
-            continue
-        collected = result[num]
-        collected_set = set(collected)
-        # Names in formeOrder that we actually collected (preserves game order)
-        ordered = [n for n in fo if n in collected_set]
-        # Any collected names not covered by formeOrder go at the end
-        in_fo = set(fo)
-        extras = [n for n in collected if n not in in_fo]
-        result[num] = ordered + extras
-
-    # Post-process: for mons with cosmeticFormes but no otherFormes (e.g. Unown),
-    # append the cosmetic formes as additional form slots
-    for num, cf in cosmetic_formes_by_num.items():
-        if num in has_other_formes_by_num:
-            continue  # has real formes — cosmetic ones are truly cosmetic, skip
-        if num not in result:
-            continue
-        # Use formeOrder if available (already includes base + cosmetics in order)
-        fo = forme_order_by_num.get(num, [])
-        if fo:
-            result[num] = fo  # formeOrder already has base + all cosmetic slots
-        else:
-            result[num] = result[num] + cf
-
-    return result
-
-
 # ─── BUILD MAPPING: (monsNo, formNo, is_female) → showdown_name ──────────────
 
 def build_name_map(
     order: list[tuple[int, int, bool, int]],
     dex: dict[int, list[str]],
+    base_slugs: dict[int, str] | None = None,
 ) -> dict[tuple[int, int, bool, int], str]:
     """
-    For each entry in the order list, resolve the Showdown name.
-
-    formNo maps directly to the dex form index.
-    - Form 0 is the base species slug (no hyphen), e.g. "charizard", "hooh".
-    - Form > 0 is a forme slug. The base species prefix is stripped and
-      re-attached with a hyphen separator, e.g. "charizardmegax" → "charizard-megax".
-    Female variants get a -f suffix.
-    Cosmetic variants (variantIdx > 0) get a -vN suffix.
+    For each entry in the order list, resolve the Showdown name via
+    pokedex_names.resolve_showdown_name().
     """
-    name_map: dict[tuple[int, int, bool, int], str] = {}
-
-    for (mon, form, female, variant) in order:
-        # Check for a direct (monsNo, formNo) override first
-        if (mon, form) in _FORM_OVERRIDES:
-            base_name = _FORM_OVERRIDES[(mon, form)]
-            suffix = ""
-            if female:
-                suffix += "-f"
-            if mon == 869 and variant in _ALCREMIE_SWEET_SUFFIXES:
-                sweet = _ALCREMIE_SWEET_SUFFIXES[variant]
-                suffix += sweet
-                if sweet:
-                    base_name = base_name.replace("-", "")
-            elif variant > 0:
-                suffix += f"-v{variant}"
-            name_map[(mon, form, female, variant)] = _RELUMI_OVERRIDES.get(
-                base_name + suffix, base_name + suffix
-            )
-            continue
-
-        names = dex.get(mon, [])
-        if not names:
-            base_name = f"mon{mon:04d}form{form:02d}"
-        elif form < len(names):
-            flat = names[form]
-            if form == 0:
-                # Base species — no separator needed
-                base_name = flat
-            else:
-                # Forme — strip the base species prefix and re-insert hyphen separator.
-                # names[0] is the flat base slug (e.g. "charizard").
-                base_slug = names[0]
-                if flat.startswith(base_slug):
-                    forme_part = flat[len(base_slug):]  # e.g. "megax"
-                    base_name = base_slug + ("-" + forme_part if forme_part else "")
-                else:
-                    # Forme name doesn't share the base prefix (shouldn't happen, but safe fallback)
-                    base_name = flat
-        else:
-            # formNo exceeds known dex entries — custom/game-only form.
-            # Name it after the base form (index 0) + the form number.
-            base_name = names[0] + f"-form{form}"
-
-        suffix = ""
-        if female:
-            suffix += "-f"
-        if mon == 869 and variant in _ALCREMIE_SWEET_SUFFIXES:
-            # Alcremie: variantIdx encodes the sweet decoration, not a cosmetic variant.
-            sweet = _ALCREMIE_SWEET_SUFFIXES[variant]
-            suffix += sweet
-            # When a sweet suffix is present the cream form's internal hyphen is dropped:
-            # "alcremie-rubycream" + "-berry" → "alcremierubycream-berry"
-            # Strawberry sweet (no suffix) keeps the hyphen: "alcremie-rubycream"
-            if sweet:
-                base_name = base_name.replace("-", "")
-        elif variant > 0:
-            suffix += f"-v{variant}"
-
-        name_map[(mon, form, female, variant)] = _RELUMI_OVERRIDES.get(
-            base_name + suffix, base_name + suffix
-        )
-
-    return name_map
+    return {
+        (mon, form, female, variant): resolve_showdown_name(mon, form, female, variant, dex, base_slugs)
+        for (mon, form, female, variant) in order
+    }
 
 
 # ─── RESIZE GIF ──────────────────────────────────────────────────────────────
@@ -452,11 +188,11 @@ def main():
     print(f"  {len(order)} entries")
 
     print("Parsing pokedex.ts...")
-    dex = parse_pokedex(args.pokedex)
+    dex, base_slugs = parse_pokedex(args.pokedex)
     print(f"  {len(dex)} Pokémon")
 
     print("Building name map...")
-    name_map = build_name_map(order, dex)
+    name_map = build_name_map(order, dex, base_slugs)
 
     # Find all GIFs in output dir
     gif_files = sorted(args.output_dir.glob("*.gif"))

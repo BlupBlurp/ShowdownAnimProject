@@ -20,7 +20,7 @@ Variant rules:
     _01  → shiny sprite   → output/home-centered-shiny/{name}.png
     _10, _11, etc. → skipped
 
-Forms not present in pokedex.ts are skipped (already handled upstream).
+Forms not present in pokedex.ts are named "{base_name}-{form}" using form 0 as the base.
 
 Centering: the sprite content (non-transparent pixels) is centered within
 the original canvas size.
@@ -34,64 +34,14 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-
-# ─── PARSE pokedex.ts ────────────────────────────────────────────────────────
-
-def _showdown_name(raw: str) -> str:
-    name = raw.strip().strip('"').strip("'")
-    name = name.lower().replace(" ", "-")
-    name = re.sub(r"[^a-z0-9\-]", "", name)
-    name = re.sub(r"-+", "-", name)
-    return name
-
-
-def parse_pokedex(path: Path) -> dict[int, list[str]]:
-    """
-    Returns {num: [name_form0, name_form1, ...]} ordered by appearance.
-    Cosmetic formes are skipped.
-    """
-    text = path.read_text(encoding="utf-8")
-    result: dict[int, list[str]] = {}
-
-    entries_raw = []
-    i = 0
-    while i < len(text):
-        m = re.search(r'\b(\w+)\s*:\s*\{', text[i:])
-        if not m:
-            break
-        start = i + m.start()
-        brace_start = i + m.end() - 1
-        depth = 0
-        j = brace_start
-        while j < len(text):
-            if text[j] == '{':
-                depth += 1
-            elif text[j] == '}':
-                depth -= 1
-                if depth == 0:
-                    entries_raw.append(text[start:j + 1])
-                    i = j + 1
-                    break
-            j += 1
-        else:
-            break
-
-    for block in entries_raw:
-        if "isCosmeticForme" in block:
-            continue
-        num_m = re.search(r'\bnum\s*:\s*(-?\d+)', block)
-        if not num_m:
-            continue
-        num = int(num_m.group(1))
-        name_m = re.search(r'\bname\s*:\s*"([^"]+)"', block)
-        if not name_m:
-            continue
-        name = _showdown_name(name_m.group(1))
-        if num not in result:
-            result[num] = []
-        result[num].append(name)
-
-    return result
+from pokedex_names import (
+    parse_pokedex,
+    parse_gender_differences,
+    resolve_showdown_name,
+    ALCREMIE_CREAM_FORMS,
+    ALCREMIE_SWEET_SUFFIXES,
+    RELUMI_OVERRIDES,
+)
 
 
 # ─── CENTER IMAGE ─────────────────────────────────────────────────────────────
@@ -131,22 +81,7 @@ def center_sprite(img: Image.Image) -> Image.Image:
 
 
 # ─── ALCREMIE SWEET DECORATION MAPPING ───────────────────────────────────────
-
-# Alcremie cream-form index → Showdown base name.
-# The cream forms are cosmeticFormes in pokedex.ts so parse_pokedex (which skips
-# isCosmeticForme blocks) only returns the base entry.  We hardcode the mapping
-# here so rename_home.py doesn't need the full cosmetic-forme expansion logic.
-_ALCREMIE_CREAM_FORMS: dict[int, str] = {
-    0: "alcremie",
-    1: "alcremie-rubycream",
-    2: "alcremie-matchacream",
-    3: "alcremie-mintcream",
-    4: "alcremie-lemoncream",
-    5: "alcremie-saltedcream",
-    6: "alcremie-rubyswirl",
-    7: "alcremie-caramelswirl",
-    8: "alcremie-rainbowswirl",
-}
+# ALCREMIE_CREAM_FORMS and ALCREMIE_SWEET_SUFFIXES are imported from pokedex_names.
 
 
 # ─── MAIN ────────────────────────────────────────────────────────────────────
@@ -161,8 +96,9 @@ def main():
     args = parser.parse_args()
 
     print("Parsing pokedex.ts...")
-    dex = parse_pokedex(args.pokedex)
+    dex, base_slugs = parse_pokedex(args.pokedex)
     print(f"  {len(dex)} Pokémon")
+    gender_diffs = parse_gender_differences(args.pokedex)
 
     out_normal = args.output_dir / "home-centered"
     out_shiny  = args.output_dir / "home-centered-shiny"
@@ -176,26 +112,58 @@ def main():
         print(f"No PNGs found in {args.input_dir}")
         sys.exit(0)
 
-    # Build a map: (mon, form) → {variant_str: Path}
-    # Alcremie files (pm0869_...) are handled separately below because they use
-    # a 4-field naming scheme: pm0869_FF_NS_SS where NS=10/11 (normal/shiny)
-    # and SS=00-06 (sweet index, optional — absent means strawberry sweet).
+    # Build a map: (mon, form) → {(tens_group: int, shiny: bool, variant_idx: int): Path}
+    # Alcremie files (pm0869_...) are handled separately below.
+    #
+    # HOME filename formats:
+    #   3-field: pm{mon:04d}_{form:02d}_{GS:02d}.png
+    #     GS is a two-digit code: tens = HOME's internal group index (not always 0-based),
+    #                              units = shiny (0=normal, 1=shiny)
+    #     The tens group is NOT a reliable gender indicator on its own — we resolve
+    #     female status later by checking whether the mon has gender differences.
+    #
+    #   4-field: pm{mon:04d}_{form:02d}_{GS:02d}_{variant:02d}.png
+    #     Same GS encoding, plus an explicit variant index (for Arbok, Magikarp etc.)
+    #     When 4-field files exist for a (mon, form) group, 3-field files are skipped.
     from collections import defaultdict
-    groups: dict[tuple[int, int], dict[str, Path]] = defaultdict(dict)
+    groups: dict[tuple[int, int], dict[tuple[int, bool, int], Path]] = defaultdict(dict)
+    has_4field: set[tuple[int, int]] = set()
     alcremie_pngs: list[Path] = []
     unparsed = []
+    pending_3field: list[tuple[tuple[int, int], tuple[int, bool, int], Path]] = []
+
     for png in pngs:
-        m = re.match(r'^pm(\d{4})_(\d{2})_(\d{2})', png.name)
-        if not m:
+        m4 = re.match(r'^pm(\d{4})_(\d{2})_(\d{2})_(\d{2})', png.name)
+        m3 = re.match(r'^pm(\d{4})_(\d{2})_(\d{2})$', png.stem)
+        if m4:
+            mon     = int(m4.group(1))
+            form    = int(m4.group(2))
+            gs      = int(m4.group(3))
+            variant = int(m4.group(4))
+            tens    = gs // 10
+            shiny   = (gs % 10) == 1
+            if mon == 869:
+                alcremie_pngs.append(png)
+                continue
+            groups[(mon, form)][(tens, shiny, variant)] = png
+            has_4field.add((mon, form))
+        elif m3:
+            mon  = int(m3.group(1))
+            form = int(m3.group(2))
+            gs   = int(m3.group(3))
+            tens  = gs // 10
+            shiny = (gs % 10) == 1
+            if mon == 869:
+                alcremie_pngs.append(png)
+                continue
+            pending_3field.append(((mon, form), (tens, shiny, 0), png))
+        else:
             unparsed.append(png)
-            continue
-        mon  = int(m.group(1))
-        form = int(m.group(2))
-        if mon == 869:
-            alcremie_pngs.append(png)
-            continue
-        variant = m.group(3)
-        groups[(mon, form)][variant] = png
+
+    # Add 3-field entries only for groups that have no 4-field files
+    for key, variant_key, png in pending_3field:
+        if key not in has_4field:
+            groups[key][variant_key] = png
 
     for png in unparsed:
         print(f"  SKIP (unexpected name): {png.name}")
@@ -209,17 +177,8 @@ def main():
     #   SS = sweet index 00–06 (absent = strawberry sweet, same as 00)
     # Sweet index → suffix: 00/absent=strawberry (no suffix), 01=berry, 02=love,
     #   03=star, 04=clover, 05=flower, 06=ribbon.
-    # The cream forms are cosmeticFormes in pokedex.ts so we use the hardcoded
-    # _ALCREMIE_CREAM_FORMS table instead of the dex lookup.
-    _ALCREMIE_SWEET_INDEX_TO_SUFFIX: dict[int, str] = {
-        0: "",          # Strawberry Sweet — no suffix (base name)
-        1: "-berry",    # Berry Sweet
-        2: "-love",     # Love Sweet
-        3: "-star",     # Star Sweet
-        4: "-clover",   # Clover Sweet
-        5: "-flower",   # Flower Sweet
-        6: "-ribbon",   # Ribbon Sweet
-    }
+    # The cream forms are cosmeticFormes in pokedex.ts so we use the imported
+    # ALCREMIE_CREAM_FORMS table instead of the dex lookup.
     for png in sorted(alcremie_pngs):
         # Match both 3-field (pm0869_FF_NS) and 4-field (pm0869_FF_NS_SS) names
         m = re.match(r'^pm0869_(\d{2})_(10|11)(?:_(\d{2}))?', png.name)
@@ -232,13 +191,13 @@ def main():
         is_shiny  = m.group(2) == "11"
         sweet_idx = int(m.group(3)) if m.group(3) is not None else 0
 
-        cream_base = _ALCREMIE_CREAM_FORMS.get(form)
+        cream_base = ALCREMIE_CREAM_FORMS.get(form)
         if cream_base is None:
             print(f"  SKIP (unknown Alcremie cream form {form}): {png.name}")
             skipped += 1
             continue
 
-        sweet_suffix = _ALCREMIE_SWEET_INDEX_TO_SUFFIX.get(sweet_idx)
+        sweet_suffix = ALCREMIE_SWEET_SUFFIXES.get(sweet_idx)
         if sweet_suffix is None:
             print(f"  SKIP (unknown Alcremie sweet index {sweet_idx}): {png.name}")
             skipped += 1
@@ -248,7 +207,7 @@ def main():
         # e.g. "alcremie-rubycream" + "-berry" → "alcremierubycream-berry"
         # The base (strawberry sweet, no suffix) keeps its hyphen: "alcremie-rubycream"
         prefix = cream_base.replace("-", "") if sweet_suffix else cream_base
-        full_name = prefix + sweet_suffix
+        full_name = RELUMI_OVERRIDES.get(prefix + sweet_suffix, prefix + sweet_suffix)
         dest_dir  = out_shiny if is_shiny else out_normal
         dest      = dest_dir / f"{full_name}.png"
         label     = f"{'[shiny] ' if is_shiny else ''}{png.name} → {dest.relative_to(args.output_dir)}"
@@ -263,47 +222,29 @@ def main():
     # ── end Alcremie ──────────────────────────────────────────────────────────
 
     for (mon, form), variants in sorted(groups.items()):
-        # Look up Showdown name — skip if form not in dex
         names = dex.get(mon)
-        if names is None or form >= len(names):
+        if names is None:
             skipped += len(variants)
             continue
 
-        showdown_name = names[form]
+        base_name = resolve_showdown_name(mon, form, False, 0, dex, base_slugs)
 
-        # Determine which variant is "normal" and which is "shiny".
-        #
-        # Preferred: _00 = normal, _01 = shiny.
-        # Fallback (e.g. pm0792_00_20 / pm0792_00_21): when _00/_01 are absent,
-        # use the lowest-numbered variant as normal and the one ending in '1'
-        # (same tens digit + 1) as shiny. Any other variants are skipped.
+        # variants is keyed by (tens_group, is_shiny, variant_idx).
+        # tens_group is HOME's internal group index — not necessarily 0-based.
+        # Sort the unique tens values: first = male/default, second = female
+        # (only if this mon has gender differences per pokedex).
+        # variant_idx 0 → base name, variant_idx N>0 → base_name + "-vN"
+        tens_groups = sorted(set(tg for (tg, _, _) in variants))
+        has_female = mon in gender_diffs and len(tens_groups) >= 2
 
-        if "00" in variants or "01" in variants:
-            # Standard case
-            to_process = {}
-            if "00" in variants:
-                to_process["00"] = (variants["00"], False)
-            if "01" in variants:
-                to_process["01"] = (variants["01"], True)
-            # Skip everything else (_10, _11, etc.)
-        else:
-            # Non-standard variant numbering — pick lowest as normal,
-            # its +1 counterpart (same tens digit, units=1) as shiny.
-            sorted_vars = sorted(variants.keys())
-            normal_var = sorted_vars[0]
-            # Shiny is the same tens digit with units digit = 1
-            tens = normal_var[0]  # first character
-            shiny_var = tens + "1"
-            to_process = {}
-            to_process[normal_var] = (variants[normal_var], False)
-            if shiny_var in variants:
-                to_process[shiny_var] = (variants[shiny_var], True)
-            # Skip any remaining variants
-            skipped += len(variants) - len(to_process)
+        for (tens_group, is_shiny, variant_idx), png in sorted(variants.items()):
+            is_female = has_female and (tens_group == tens_groups[1])
+            name = resolve_showdown_name(mon, form, is_female, 0, dex, base_slugs)
+            if variant_idx > 0:
+                name = f"{name}-v{variant_idx}"
 
-        for var_str, (png, is_shiny) in to_process.items():
             dest_dir = out_shiny if is_shiny else out_normal
-            dest = dest_dir / f"{showdown_name}.png"
+            dest = dest_dir / f"{name}.png"
             label = f"{'[shiny] ' if is_shiny else ''}{png.name} → {dest.relative_to(args.output_dir)}"
 
             if not args.dry_run:
